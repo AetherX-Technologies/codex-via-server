@@ -1,10 +1,12 @@
 {
   "name": "codex-via-server-contract-tests",
-  "version": "0.1.0",
+  "version": "0.2.0-dev.1",
   "private": true,
   "type": "module",
   "scripts": {
-    "test:schemas": "node tests/validate-schemas.mjs"
+    "test:schemas": "node tests/validate-schemas.mjs",
+    "test:compatibility": "node tests/validate-compatibility.mjs",
+    "test:contracts": "npm run test:schemas && npm run test:compatibility"
   },
   "devDependencies": {
     "ajv": "8.20.0",
