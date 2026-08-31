@@ -3,6 +3,12 @@ $ErrorActionPreference = "Stop"
 
 $script:ClientVersion = "0.2.0-dev.1"
 
+function Invoke-CvsSshKeygen {
+    param([Parameter(Mandatory)][AllowEmptyString()][string[]]$Arguments)
+    $executable = if ($env:CODEX_VIA_SERVER_SSH_KEYGEN) { $env:CODEX_VIA_SERVER_SSH_KEYGEN } else { "ssh-keygen.exe" }
+    & $executable @Arguments
+}
+
 function Test-CvsDeviceId {
     param([Parameter(Mandatory)][string]$DeviceId)
     return $DeviceId -cmatch '^[a-z0-9][a-z0-9._-]{1,62}[a-z0-9]$'
@@ -71,7 +77,7 @@ function Initialize-CvsDevice {
         }
     }
     if (-not (Test-Path $privateKey)) {
-        & ssh-keygen.exe -q -t ed25519 -N "" -C $DeviceId -f $privateKey
+        Invoke-CvsSshKeygen -Arguments @("-q", "-t", "ed25519", "-N", "", "-C", $DeviceId, "-f", $privateKey)
         if ($LASTEXITCODE -ne 0) { throw "ssh-keygen failed" }
     }
     Set-CvsPrivateAcl $privateKey
@@ -132,7 +138,7 @@ function Import-CvsConnectionProfile {
     $privateKey = Join-Path $keyDirectory $deviceId
     $publicKey = "${privateKey}.pub"
     if (-not (Test-Path $privateKey) -or -not (Test-Path $publicKey)) { throw "Approved device key pair is missing" }
-    $fingerprintOutput = & ssh-keygen.exe -lf $publicKey -E sha256
+    $fingerprintOutput = Invoke-CvsSshKeygen -Arguments @("-lf", $publicKey, "-E", "sha256")
     if ($LASTEXITCODE -ne 0) { throw "Cannot fingerprint device key" }
     $actualFingerprint = ($fingerprintOutput -split '\s+')[1]
     if ($actualFingerprint -cne [string]$profile.approved_device.public_key_fingerprint) { throw "Approved device fingerprint does not match" }

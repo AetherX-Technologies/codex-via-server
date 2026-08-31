@@ -4,10 +4,12 @@ BeforeAll {
     $script:TestHome = Join-Path $TestDrive "home"
     New-Item -ItemType Directory -Force -Path $script:TestHome | Out-Null
     $env:CODEX_VIA_SERVER_HOME = $script:TestHome
+    $env:CODEX_VIA_SERVER_SSH_KEYGEN = (Get-Command ssh-keygen).Source
 }
 
 AfterAll {
     Remove-Item Env:CODEX_VIA_SERVER_HOME -ErrorAction SilentlyContinue
+    Remove-Item Env:CODEX_VIA_SERVER_SSH_KEYGEN -ErrorAction SilentlyContinue
 }
 
 Describe "Windows setup and enrollment" {
@@ -17,13 +19,15 @@ Describe "Windows setup and enrollment" {
         $first = Get-Content $request -Raw | ConvertFrom-Json
         $first.platform | Should -Be "windows"
         $first.PSObject.Properties.Name | Should -Not -Contain "api_key"
-        $key = Join-Path $HOME ".codex-via-server/keys/windows-test-01.pub"
-        $fingerprint1 = (& ssh-keygen.exe -lf $key -E sha256 -ErrorAction Stop) -split '\s+'
+        $key = Join-Path $env:CODEX_VIA_SERVER_HOME "keys/windows-test-01.pub"
+        $fingerprint1 = (& $env:CODEX_VIA_SERVER_SSH_KEYGEN -lf $key -E sha256) -split '\s+'
         Initialize-CvsDevice -DeviceId "windows-test-01" -OutputPath $request | Out-Null
-        $fingerprint2 = (& ssh-keygen.exe -lf $key -E sha256 -ErrorAction Stop) -split '\s+'
+        $fingerprint2 = (& $env:CODEX_VIA_SERVER_SSH_KEYGEN -lf $key -E sha256) -split '\s+'
         $fingerprint1[1] | Should -Be $fingerprint2[1]
-        $acl = Get-Acl (Join-Path $HOME ".codex-via-server/keys/windows-test-01")
-        $acl.AreAccessRulesProtected | Should -BeTrue
+        if ($IsWindows) {
+            $acl = Get-Acl (Join-Path $env:CODEX_VIA_SERVER_HOME "keys/windows-test-01")
+            $acl.AreAccessRulesProtected | Should -BeTrue
+        }
     }
 
     It "rejects unsafe device identifiers" {
@@ -33,8 +37,8 @@ Describe "Windows setup and enrollment" {
     It "imports a matching no-secret profile without changing default config" {
         $request = Join-Path $TestDrive "enroll-request.json"
         Initialize-CvsDevice -DeviceId "windows-enroll-01" -OutputPath $request | Out-Null
-        $publicKey = Join-Path $HOME ".codex-via-server/keys/windows-enroll-01.pub"
-        $fingerprint = ((& ssh-keygen.exe -lf $publicKey -E sha256) -split '\s+')[1]
+        $publicKey = Join-Path $env:CODEX_VIA_SERVER_HOME "keys/windows-enroll-01.pub"
+        $fingerprint = ((& $env:CODEX_VIA_SERVER_SSH_KEYGEN -lf $publicKey -E sha256) -split '\s+')[1]
         $profile = Join-Path $TestDrive "profile.json"
         [ordered]@{
             schema_version = 1
@@ -45,7 +49,7 @@ Describe "Windows setup and enrollment" {
             approved_device = [ordered]@{device_id="windows-enroll-01";public_key_fingerprint=$fingerprint}
             issued_at = "2026-08-31T09:00:00Z"
         } | ConvertTo-Json -Depth 8 | Set-Content $profile -Encoding utf8NoBOM
-        $codexHome = Join-Path $HOME ".codex"
+        $codexHome = Join-Path $env:CODEX_VIA_SERVER_HOME ".codex"
         New-Item -ItemType Directory -Force -Path $codexHome | Out-Null
         $defaultConfig = Join-Path $codexHome "config.toml"
         Set-Content $defaultConfig 'sentinel = "unchanged"'
@@ -62,8 +66,8 @@ Describe "Windows setup and enrollment" {
     It "rejects an unknown nested credential field" {
         $request = Join-Path $TestDrive "unsafe-request.json"
         Initialize-CvsDevice -DeviceId "windows-unsafe-01" -OutputPath $request | Out-Null
-        $publicKey = Join-Path $HOME ".codex-via-server/keys/windows-unsafe-01.pub"
-        $fingerprint = ((& ssh-keygen.exe -lf $publicKey -E sha256) -split '\s+')[1]
+        $publicKey = Join-Path $env:CODEX_VIA_SERVER_HOME "keys/windows-unsafe-01.pub"
+        $fingerprint = ((& $env:CODEX_VIA_SERVER_SSH_KEYGEN -lf $publicKey -E sha256) -split '\s+')[1]
         $profile = Join-Path $TestDrive "unsafe-profile.json"
         [ordered]@{
             schema_version=1; profile_id="unsafe-profile"
