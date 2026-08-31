@@ -1,0 +1,213 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+umask 077
+
+PROGRAM_NAME="codex-via-server-admin"
+CONFIG_FILE="${CODEX_VIA_SERVER_ADMIN_CONFIG:-${HOME}/.config/codex-via-server/admin.json}"
+SERVER_DEVICE_TOOL="/usr/local/sbin/codex-via-server-devices"
+RUNTIME_DIR=""
+
+fail() {
+  printf '%s: %s\n' "$PROGRAM_NAME" "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  codex-via-server-admin approve <request.json> --output <connection-profile.json>
+  codex-via-server-admin list
+  codex-via-server-admin revoke <device-id>
+
+Set CODEX_VIA_SERVER_ADMIN_CONFIG to override the default admin.json path.
+EOF
+}
+
+cleanup() {
+  exit_status=$?
+  trap - EXIT HUP INT TERM
+  if [[ -n "$RUNTIME_DIR" ]]; then
+    find "$RUNTIME_DIR" -depth -delete
+  fi
+  exit "$exit_status"
+}
+
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+for dependency in jq ssh ssh-keygen ssh-keyscan; do
+  command -v "$dependency" >/dev/null 2>&1 || fail "missing command: $dependency"
+done
+
+[[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]] || fail "admin configuration is missing or unsafe: $CONFIG_FILE"
+config_mode="$(stat -f '%Lp' "$CONFIG_FILE" 2>/dev/null || stat -c '%a' "$CONFIG_FILE")"
+[[ "$config_mode" == "600" ]] || fail "admin configuration mode must be 0600"
+
+jq -e '
+  type == "object" and
+  (keys | sort) == ["admin", "client", "gateway", "profile_id", "schema_version", "tunnel"] and
+  .schema_version == 1 and
+  (.profile_id | type == "string") and
+  (.admin | type == "object") and
+  (.admin.host | type == "string") and
+  (.admin.port | type == "number") and
+  (.admin.user | type == "string") and
+  (.admin.identity | type == "string") and
+  (.admin.host_fingerprints | type == "array" and length > 0) and
+  (.tunnel | type == "object") and
+  (.tunnel.host | type == "string") and
+  (.tunnel.port | type == "number") and
+  (.tunnel.user == "codex-tunnel") and
+  (.gateway.remote_host == "127.0.0.1") and
+  (.gateway.remote_port | type == "number") and
+  (.client.local_port | type == "number") and
+  (.client.codex_profile | type == "string") and
+  (.client.minimum_client_version | type == "string") and
+  (.client.minimum_codex_version | type == "string")
+' "$CONFIG_FILE" >/dev/null || fail "invalid admin configuration"
+
+ADMIN_HOST="$(jq -r '.admin.host' "$CONFIG_FILE")"
+ADMIN_PORT="$(jq -r '.admin.port' "$CONFIG_FILE")"
+ADMIN_USER="$(jq -r '.admin.user' "$CONFIG_FILE")"
+ADMIN_IDENTITY="$(jq -r '.admin.identity' "$CONFIG_FILE")"
+PROFILE_ID="$(jq -r '.profile_id' "$CONFIG_FILE")"
+TUNNEL_HOST="$(jq -r '.tunnel.host' "$CONFIG_FILE")"
+TUNNEL_PORT="$(jq -r '.tunnel.port' "$CONFIG_FILE")"
+TUNNEL_USER="$(jq -r '.tunnel.user' "$CONFIG_FILE")"
+GATEWAY_REMOTE_HOST="$(jq -r '.gateway.remote_host' "$CONFIG_FILE")"
+GATEWAY_REMOTE_PORT="$(jq -r '.gateway.remote_port' "$CONFIG_FILE")"
+LOCAL_PORT="$(jq -r '.client.local_port' "$CONFIG_FILE")"
+CODEX_PROFILE="$(jq -r '.client.codex_profile' "$CONFIG_FILE")"
+MINIMUM_CLIENT_VERSION="$(jq -r '.client.minimum_client_version' "$CONFIG_FILE")"
+MINIMUM_CODEX_VERSION="$(jq -r '.client.minimum_codex_version' "$CONFIG_FILE")"
+
+HOST_PATTERN='^(100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}|[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?){1,6})$'
+[[ "$ADMIN_IDENTITY" = /* && -r "$ADMIN_IDENTITY" ]] || fail "admin SSH identity is not readable"
+[[ "$ADMIN_HOST" =~ $HOST_PATTERN ]] || fail "invalid admin host"
+[[ "$TUNNEL_HOST" =~ $HOST_PATTERN ]] || fail "invalid tunnel host"
+[[ "$ADMIN_USER" =~ ^[A-Za-z0-9._-]+$ ]] || fail "invalid admin user"
+[[ "$ADMIN_PORT" =~ ^[0-9]+$ && "$ADMIN_PORT" -ge 1 && "$ADMIN_PORT" -le 65535 ]] || fail "invalid admin port"
+[[ "$TUNNEL_PORT" =~ ^[0-9]+$ && "$TUNNEL_PORT" -ge 1 && "$TUNNEL_PORT" -le 65535 ]] || fail "invalid tunnel port"
+[[ "$GATEWAY_REMOTE_PORT" =~ ^[0-9]+$ && "$GATEWAY_REMOTE_PORT" -ge 1024 && "$GATEWAY_REMOTE_PORT" -le 65535 ]] || fail "invalid gateway port"
+[[ "$LOCAL_PORT" =~ ^[0-9]+$ && "$LOCAL_PORT" -ge 1024 && "$LOCAL_PORT" -le 65535 ]] || fail "invalid local port"
+[[ "$PROFILE_ID" =~ ^[a-z0-9][a-z0-9._-]{1,62}[a-z0-9]$ ]] || fail "invalid profile id"
+[[ "$CODEX_PROFILE" =~ ^[A-Za-z0-9_-]+$ ]] || fail "invalid Codex profile name"
+
+RUNTIME_DIR="$(mktemp -d /tmp/codex-via-server-admin.XXXXXX)"
+SCANNED_KEYS="${RUNTIME_DIR}/known_hosts.scanned"
+VERIFIED_KEYS="${RUNTIME_DIR}/known_hosts"
+CANDIDATE_KEY="${RUNTIME_DIR}/candidate-key"
+
+ssh-keyscan -T 5 -p "$ADMIN_PORT" "$ADMIN_HOST" >"$SCANNED_KEYS" 2>/dev/null \
+  || fail "could not read administrator SSH host keys"
+
+while IFS= read -r host_key_line; do
+  case "$host_key_line" in
+    ''|'#'*) continue ;;
+  esac
+
+  printf '%s\n' "$host_key_line" >"$CANDIDATE_KEY"
+  fingerprint="$(ssh-keygen -lf "$CANDIDATE_KEY" -E sha256 2>/dev/null | awk 'NR == 1 {print $2}')"
+  if jq -e --arg fingerprint "$fingerprint" '.admin.host_fingerprints | index($fingerprint) != null' "$CONFIG_FILE" >/dev/null; then
+    printf '%s\n' "$host_key_line" >>"$VERIFIED_KEYS"
+  fi
+done <"$SCANNED_KEYS"
+
+[[ -s "$VERIFIED_KEYS" ]] || fail "administrator SSH host fingerprint changed"
+
+SSH_COMMAND=(
+  ssh
+  -F /dev/null
+  -p "$ADMIN_PORT"
+  -i "$ADMIN_IDENTITY"
+  -o BatchMode=yes
+  -o IdentitiesOnly=yes
+  -o PasswordAuthentication=no
+  -o KbdInteractiveAuthentication=no
+  -o StrictHostKeyChecking=yes
+  -o UserKnownHostsFile="$VERIFIED_KEYS"
+  -o GlobalKnownHostsFile=/dev/null
+  -o UpdateHostKeys=no
+  -o ProxyCommand=none
+  -o ProxyJump=none
+  -o ConnectTimeout=8
+  -o ConnectionAttempts=1
+  -o LogLevel=ERROR
+)
+SSH_TARGET="${ADMIN_USER}@${ADMIN_HOST}"
+
+command_name="${1:-}"
+case "$command_name" in
+  approve)
+    [[ $# -eq 4 && "$3" == "--output" ]] || fail "approve requires <request.json> --output <profile.json>"
+    request_file="$2"
+    output_file="$4"
+    [[ -f "$request_file" && ! -L "$request_file" ]] || fail "request must be a regular non-symlink file"
+    [[ "$output_file" = /* ]] || fail "output path must be absolute"
+    [[ ! -L "$output_file" ]] || fail "output path must not be a symbolic link"
+    if [[ -e "$output_file" && ! -f "$output_file" ]]; then
+      fail "output path must be a regular file"
+    fi
+
+    approval_response="$(
+      "${SSH_COMMAND[@]}" "$SSH_TARGET" "$SERVER_DEVICE_TOOL" approve - <"$request_file"
+    )"
+    printf '%s\n' "$approval_response" | jq -e '.status == "approved"' >/dev/null \
+      || fail "server approval failed"
+
+    device_id="$(printf '%s\n' "$approval_response" | jq -r '.device_id')"
+    device_fingerprint="$(printf '%s\n' "$approval_response" | jq -r '.public_key_fingerprint')"
+    issued_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    output_directory="$(dirname "$output_file")"
+    install -d -m 0700 "$output_directory"
+    temporary_output="${RUNTIME_DIR}/connection-profile.json"
+
+    jq -n \
+      --arg profile_id "$PROFILE_ID" \
+      --arg server_host "$TUNNEL_HOST" \
+      --argjson ssh_port "$TUNNEL_PORT" \
+      --arg ssh_user "$TUNNEL_USER" \
+      --argjson host_fingerprints "$(jq '.admin.host_fingerprints' "$CONFIG_FILE")" \
+      --arg remote_host "$GATEWAY_REMOTE_HOST" \
+      --argjson remote_port "$GATEWAY_REMOTE_PORT" \
+      --argjson local_port "$LOCAL_PORT" \
+      --arg codex_profile "$CODEX_PROFILE" \
+      --arg minimum_client_version "$MINIMUM_CLIENT_VERSION" \
+      --arg minimum_codex_version "$MINIMUM_CODEX_VERSION" \
+      --arg device_id "$device_id" \
+      --arg public_key_fingerprint "$device_fingerprint" \
+      --arg issued_at "$issued_at" \
+      '{
+        schema_version: 1,
+        profile_id: $profile_id,
+        server: {host: $server_host, ssh_port: $ssh_port, ssh_user: $ssh_user, host_fingerprints: $host_fingerprints},
+        gateway: {remote_host: $remote_host, remote_port: $remote_port},
+        client: {local_port: $local_port, codex_profile: $codex_profile, minimum_client_version: $minimum_client_version, minimum_codex_version: $minimum_codex_version},
+        approved_device: {device_id: $device_id, public_key_fingerprint: $public_key_fingerprint},
+        issued_at: $issued_at
+      }' >"$temporary_output"
+
+    install -m 0600 "$temporary_output" "$output_file"
+    printf 'Approved %s. Connection profile: %s\n' "$device_id" "$output_file"
+    ;;
+  list)
+    [[ $# -eq 1 ]] || fail "list accepts no arguments"
+    "${SSH_COMMAND[@]}" "$SSH_TARGET" "$SERVER_DEVICE_TOOL" list
+    ;;
+  revoke)
+    [[ $# -eq 2 ]] || fail "revoke requires one device id"
+    device_id="$2"
+    [[ "$device_id" =~ ^[a-z0-9][a-z0-9._-]{1,62}[a-z0-9]$ ]] || fail "invalid device id"
+    "${SSH_COMMAND[@]}" "$SSH_TARGET" "$SERVER_DEVICE_TOOL" revoke "$device_id"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

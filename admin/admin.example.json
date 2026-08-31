@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "profile_id": "personal-server",
+  "admin": {
+    "host": "100.64.10.20",
+    "port": 22,
+    "user": "root",
+    "identity": "/Users/example/.ssh/server-admin",
+    "host_fingerprints": [
+      "SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    ]
+  },
+  "tunnel": {
+    "host": "100.64.10.20",
+    "port": 22,
+    "user": "codex-tunnel"
+  },
+  "gateway": {
+    "remote_host": "127.0.0.1",
+    "remote_port": 18319
+  },
+  "client": {
+    "local_port": 18317,
+    "codex_profile": "codex-via-server",
+    "minimum_client_version": "0.2.0",
+    "minimum_codex_version": "0.149.1"
+  }
+}

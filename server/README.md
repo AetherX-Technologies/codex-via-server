@@ -29,3 +29,14 @@ before reload. A failed validation or reload restores the previous files.
 
 Use `--no-reload` only in an isolated test or when another controlled process
 will reload both services after inspecting the validated files.
+
+The installer also places the root-only device lifecycle command at:
+
+```text
+/usr/local/sbin/codex-via-server-devices
+```
+
+It accepts schema-version-1 enrollment JSON through a regular file or stdin and
+supports `approve`, `list`, and exact `revoke` operations. Normal users should
+use the trusted administrator wrapper in `admin/` instead of invoking the
+server tool directly.
