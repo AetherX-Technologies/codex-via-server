@@ -30,6 +30,11 @@ CANARY_SOURCE="${SCRIPT_DIR}/canary.sh"
 CANARY_TARGET="/usr/local/sbin/codex-via-server-canary"
 CANARY_SERVICE_SOURCE="${SCRIPT_DIR}/systemd/codex-via-server-canary.service"
 CANARY_SERVICE_TARGET="/etc/systemd/system/codex-via-server-canary.service"
+UPDATE_SOURCE="${SCRIPT_DIR}/update-cliproxyapi.sh"
+UPDATE_TARGET="/usr/local/sbin/codex-via-server-update-cliproxyapi"
+RELEASE_LIB_SOURCE="${SCRIPT_DIR}/lib/releases.sh"
+RELEASE_LIB_DIR="/usr/local/lib/codex-via-server"
+RELEASE_LIB_TARGET="${RELEASE_LIB_DIR}/releases.sh"
 
 usage() {
   cat <<'EOF'
@@ -71,6 +76,8 @@ done
 [[ -x "$DOCTOR_SOURCE" ]] || fail "missing server doctor"
 [[ -x "$CANARY_SOURCE" ]] || fail "missing server canary"
 [[ -r "$CANARY_SERVICE_SOURCE" ]] || fail "missing canary systemd unit"
+[[ -x "$UPDATE_SOURCE" ]] || fail "missing CLIProxyAPI updater"
+[[ -r "$RELEASE_LIB_SOURCE" ]] || fail "missing release helper"
 [[ -x "$NGINX_BINARY" ]] || fail "missing Nginx binary: $NGINX_BINARY"
 [[ -x "$SSHD_BINARY" ]] || fail "missing SSH daemon: $SSHD_BINARY"
 
@@ -95,6 +102,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   printf '  %s\n' "$NGINX_CONFIG_TARGET" "$SECRET_TARGET" "$SSHD_CONFIG_TARGET"
   printf '  %s\n' "$DEVICE_TOOL_TARGET" "$DEVICE_STATE_DIR"
   printf '  %s\n' "$DOCTOR_TARGET" "$CANARY_TARGET" "$CANARY_SERVICE_TARGET"
+  printf '  %s\n' "$UPDATE_TARGET" "$RELEASE_LIB_TARGET"
   exit 0
 fi
 
@@ -138,6 +146,8 @@ rollback() {
     restore_path "$DOCTOR_TARGET" doctor
     restore_path "$CANARY_TARGET" canary
     restore_path "$CANARY_SERVICE_TARGET" canary-service
+    restore_path "$UPDATE_TARGET" updater
+    restore_path "$RELEASE_LIB_TARGET" releases-lib
     "$NGINX_BINARY" -t >/dev/null 2>&1 || true
     "$SSHD_BINARY" -t >/dev/null 2>&1 || true
 
@@ -166,6 +176,8 @@ backup_path "$DEVICE_TOOL_TARGET" device-tool
 backup_path "$DOCTOR_TARGET" doctor
 backup_path "$CANARY_TARGET" canary
 backup_path "$CANARY_SERVICE_TARGET" canary-service
+backup_path "$UPDATE_TARGET" updater
+backup_path "$RELEASE_LIB_TARGET" releases-lib
 
 "$RESTRICTED_USER_INSTALLER"
 install -d -o root -g root -m 0700 "$DEVICE_STATE_DIR"
@@ -173,6 +185,9 @@ install -o root -g root -m 0750 "$DEVICE_TOOL_SOURCE" "$DEVICE_TOOL_TARGET"
 install -o root -g root -m 0750 "$DOCTOR_SOURCE" "$DOCTOR_TARGET"
 install -o root -g root -m 0750 "$CANARY_SOURCE" "$CANARY_TARGET"
 install -o root -g root -m 0644 "$CANARY_SERVICE_SOURCE" "$CANARY_SERVICE_TARGET"
+install -d -o root -g root -m 0755 "$RELEASE_LIB_DIR"
+install -o root -g root -m 0750 "$UPDATE_SOURCE" "$UPDATE_TARGET"
+install -o root -g root -m 0644 "$RELEASE_LIB_SOURCE" "$RELEASE_LIB_TARGET"
 
 install -d -o root -g root -m 0700 "$SECRET_DIR"
 install -o root -g root -m 0644 "$NGINX_CONFIG_SOURCE" "$NGINX_CONFIG_TARGET"

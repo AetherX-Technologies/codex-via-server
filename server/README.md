@@ -40,3 +40,27 @@ It accepts schema-version-1 enrollment JSON through a regular file or stdin and
 supports `approve`, `list`, and exact `revoke` operations. Normal users should
 use the trusted administrator wrapper in `admin/` instead of invoking the
 server tool directly.
+
+## Diagnostics and upgrades
+
+Run the read-only foundation doctor before production cutover:
+
+```bash
+sudo /usr/local/sbin/codex-via-server-doctor --foundation
+```
+
+After CLIProxyAPI moves to loopback-only, use `--cutover` to enforce both
+listener boundaries. The private canary sends one fixed low-output Responses
+request through the gateway and prints only status, duration, and model.
+
+CLIProxyAPI upgrades are explicit:
+
+```bash
+sudo ./server/update-cliproxyapi.sh \
+  --version <VERSION> \
+  --model <CANARY_MODEL>
+```
+
+The updater requires official release checksums, refuses versions below the
+declared minimum, preserves OAuth state, runs doctor and canary, and restores
+the previous binary, config, and unit if any gate fails.

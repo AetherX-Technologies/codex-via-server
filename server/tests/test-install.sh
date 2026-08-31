@@ -55,6 +55,8 @@ docker exec "$CONTAINER_NAME" nginx -t >/dev/null
 docker exec "$CONTAINER_NAME" /usr/sbin/sshd -t
 docker exec "$CONTAINER_NAME" test "$(docker exec "$CONTAINER_NAME" stat -c '%a %U:%G' /etc/codex-via-server/gateway-secret.conf)" = "600 root:root"
 docker exec "$CONTAINER_NAME" test "$(docker exec "$CONTAINER_NAME" stat -c '%a %U:%G' /etc/ssh/authorized_keys/codex-tunnel)" = "640 root:codex-tunnel"
+docker exec "$CONTAINER_NAME" test -x /usr/local/sbin/codex-via-server-update-cliproxyapi
+docker exec "$CONTAINER_NAME" test -r /usr/local/lib/codex-via-server/releases.sh
 
 before_nginx="$(docker exec "$CONTAINER_NAME" sha256sum /etc/nginx/conf.d/codex-via-server.conf)"
 before_secret="$(docker exec "$CONTAINER_NAME" sha256sum /etc/codex-via-server/gateway-secret.conf)"

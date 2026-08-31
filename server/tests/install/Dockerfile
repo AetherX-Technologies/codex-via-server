@@ -15,6 +15,7 @@ RUN chmod 0755 \
         /app/server/codex-via-server-devices \
         /app/server/doctor.sh \
         /app/server/canary.sh \
+        /app/server/update-cliproxyapi.sh \
     && ssh-keygen -A
 
 WORKDIR /app

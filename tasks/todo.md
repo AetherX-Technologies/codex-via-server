@@ -14,7 +14,7 @@
 - [x] Task 6: Build the idempotent server installer
 - [x] Task 7: Implement administrator device lifecycle
 - [x] Task 8: Implement server doctor and private canary
-- [ ] Task 9: Implement transactional CLIProxyAPI upgrades
+- [x] Task 9: Implement transactional CLIProxyAPI upgrades
 - [ ] Checkpoint B: Disposable server security and rollback tests pass
 
 ## Phase 3: macOS
