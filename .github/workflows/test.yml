@@ -8,15 +8,43 @@ permissions:
   contents: read
 
 jobs:
-  macos:
-    runs-on: macos-15
-    timeout-minutes: 5
+  contracts:
+    name: ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-15
+          - windows-2022
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           persist-credentials: false
 
-      - name: Run shell tests
+      - name: Set up Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22.22.3
+          cache: npm
+
+      - name: Install test dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Audit test dependencies
+        run: npm audit --audit-level=moderate
+
+      - name: Validate shared contracts
+        run: npm run test:contracts
+
+      - name: Run macOS tests
+        if: runner.os == 'macOS'
         run: bash tests/test.sh
+
+      - name: Run Windows contract checks
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./windows/tests/Test-RepositoryContracts.ps1
