@@ -40,7 +40,11 @@ run_codex_via_server_command() {
       source "$(codex_via_server_library_dir)/setup.sh"
       codex_via_server_setup "$@"
       ;;
-    enroll|doctor|update|uninstall)
+    enroll)
+      source "$(codex_via_server_library_dir)/enroll.sh"
+      codex_via_server_enroll "$@"
+      ;;
+    doctor|update|uninstall)
       printf 'codex-via-server: %s is not available in this development build yet\n' \
         "$command_name" >&2
       return 69

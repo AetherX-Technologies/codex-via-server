@@ -58,7 +58,7 @@ codex_via_server_setup() {
   output_directory="$(dirname "$output_file")"
   install -d -m 0700 "$output_directory"
   runtime_file="$(mktemp /tmp/codex-enrollment.XXXXXX)"
-  trap 'rm -f -- "$runtime_file"' RETURN
+  trap '[[ ! -e "$runtime_file" ]] || rm -f -- "$runtime_file"' RETURN
 
   jq -n \
     --arg device_id "$device_id" \
@@ -67,6 +67,8 @@ codex_via_server_setup() {
     '{schema_version: 1, device_id: $device_id, platform: "macos", public_key: $public_key, requested_at: $requested_at}' \
     >"$runtime_file"
   install -m 0600 "$runtime_file" "$output_file"
+  rm -f -- "$runtime_file"
+  trap - RETURN
 
   fingerprint="$(ssh-keygen -lf "$public_key_file" -E sha256 | awk 'NR == 1 {print $2}')"
   printf 'Enrollment request: %s\n' "$output_file"

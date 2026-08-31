@@ -97,6 +97,7 @@ LAUNCHER_FILE="${BIN_DIR}/codex-via-server"
 LIB_DIR="${HOME}/.local/lib/codex-via-server"
 COMMANDS_FILE="${LIB_DIR}/commands.sh"
 SETUP_FILE="${LIB_DIR}/setup.sh"
+ENROLL_FILE="${LIB_DIR}/enroll.sh"
 
 mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$CODEX_DIR" "$LIB_DIR"
 chmod 0700 "$CONFIG_DIR"
@@ -104,6 +105,7 @@ chmod 0700 "$CONFIG_DIR"
 install -m 0755 "${SCRIPT_DIR}/codex-via-server" "$LAUNCHER_FILE"
 install -m 0644 "${SCRIPT_DIR}/macos/lib/commands.sh" "$COMMANDS_FILE"
 install -m 0644 "${SCRIPT_DIR}/macos/lib/setup.sh" "$SETUP_FILE"
+install -m 0644 "${SCRIPT_DIR}/macos/lib/enroll.sh" "$ENROLL_FILE"
 
 {
   printf 'SSH_HOST='; shell_quote "$SSH_HOST"; printf '\n'

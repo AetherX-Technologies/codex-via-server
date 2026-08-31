@@ -21,7 +21,7 @@
 
 - [x] Task 10: Refactor the macOS launcher into subcommands
 - [x] Task 11: Implement macOS setup and enrollment requests
-- [ ] Task 12: Implement macOS connection-profile import
+- [x] Task 12: Implement macOS connection-profile import
 - [ ] Task 13: Implement macOS doctor and no-secret launcher
 - [ ] Task 14: Implement macOS update, uninstall, and v0.1 migration
 - [ ] Checkpoint C: macOS tests and human migration review pass
