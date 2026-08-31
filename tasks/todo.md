@@ -9,7 +9,7 @@
 
 ## Phase 2: Disposable server
 
-- [ ] Task 4: Create the loopback credential gateway template
+- [x] Task 4: Create the loopback credential gateway template
 - [ ] Task 5: Create the restricted SSH account template
 - [ ] Task 6: Build the idempotent server installer
 - [ ] Task 7: Implement administrator device lifecycle
