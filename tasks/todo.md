@@ -28,7 +28,7 @@
 
 ## Phase 4: Windows
 
-- [ ] Task 15: Implement Windows setup and enrollment
+- [x] Task 15: Implement Windows setup and enrollment
 - [ ] Task 16: Implement Windows doctor and launcher
 - [ ] Task 17: Implement Windows update and uninstall
 - [ ] Checkpoint D: Cross-platform client CI passes
