@@ -58,10 +58,13 @@ run_codex_via_server_command() {
       source "$(codex_via_server_library_dir)/doctor.sh"
       codex_via_server_doctor "$@"
       ;;
-    update|uninstall)
-      printf 'codex-via-server: %s is not available in this development build yet\n' \
-        "$command_name" >&2
-      return 69
+    update)
+      source "$(codex_via_server_library_dir)/update.sh"
+      codex_via_server_update "$@"
+      ;;
+    uninstall)
+      source "$(codex_via_server_library_dir)/uninstall.sh"
+      codex_via_server_uninstall "$@"
       ;;
   esac
 }

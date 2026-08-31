@@ -50,6 +50,15 @@ printf 'test identity placeholder\n' >"$FAKE_IDENTITY"
 chmod 0600 "$FAKE_IDENTITY"
 printf 'sentinel = "unchanged"\n' >"${FAKE_HOME}/.codex/config.toml"
 
+V2_HOME="${TEST_ROOT}/v2-home"
+mkdir -p "$V2_HOME"
+PATH="${FAKE_BIN}:${PATH}" HOME="$V2_HOME" bash "${ROOT_DIR}/install.sh" >/dev/null
+[[ -x "${V2_HOME}/.local/bin/codex-via-server" ]]
+[[ -f "${V2_HOME}/.local/lib/codex-via-server/setup.sh" ]]
+[[ -f "${V2_HOME}/.local/share/codex-via-server/VERSION" ]]
+[[ ! -e "${V2_HOME}/.config/codex-via-server/config" ]]
+[[ ! -e "${V2_HOME}/.codex/codex-via-server.config.toml" ]]
+
 PATH="${FAKE_BIN}:${PATH}" HOME="$FAKE_HOME" \
   bash "${ROOT_DIR}/install.sh" \
     --host 100.64.0.10 \
@@ -84,11 +93,7 @@ DOCTOR="${FAKE_HOME}/.local/lib/codex-via-server/doctor.sh"
 
 help_output="$(HOME="$FAKE_HOME" bash "$LAUNCHER" help)"
 printf '%s\n' "$help_output" | grep -q 'codex-via-server setup'
-set +e
-HOME="$FAKE_HOME" bash "$LAUNCHER" setup >/dev/null 2>&1
-setup_status=$?
-set -e
-[[ "$setup_status" == "69" ]]
+HOME="$FAKE_HOME" bash "$LAUNCHER" setup --help >/dev/null
 
 assert_contains "$CONFIG" 'SSH_HOST=100.64.0.10'
 assert_contains "$CONFIG" 'SERVER_API_PORT=8317'

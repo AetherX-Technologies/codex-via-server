@@ -5,6 +5,7 @@ umask 077
 
 PROGRAM_NAME="install-codex-via-server"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+LEGACY_MODE=0
 
 SSH_HOST=""
 SSH_PORT="22"
@@ -28,6 +29,7 @@ Usage:
     [--api-port 8317] [--local-port 18317]
 
 This installer stores connection metadata but never stores the CLIProxyAPI key.
+Run without connection arguments to install v0.2 setup and enrollment tooling.
 EOF
 }
 
@@ -57,31 +59,41 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-[[ -n "$SSH_HOST" ]] || fail "--host is required"
-[[ -n "$SSH_IDENTITY" ]] || fail "--identity is required"
-[[ -n "$SSH_HOST_FINGERPRINT" ]] || fail "--fingerprint is required"
-[[ "$SSH_IDENTITY" = /* ]] || fail "--identity must be an absolute path"
-[[ -r "$SSH_IDENTITY" ]] || fail "SSH identity is not readable: $SSH_IDENTITY"
+if [[ -n "$SSH_HOST" || -n "$SSH_IDENTITY" || -n "$SSH_HOST_FINGERPRINT" ]]; then
+  LEGACY_MODE=1
+fi
 
-if [[ -z "$SERVER_API_HOST" ]]; then
+if [[ "$LEGACY_MODE" -eq 1 ]]; then
+  [[ -n "$SSH_HOST" ]] || fail "--host is required"
+  [[ -n "$SSH_IDENTITY" ]] || fail "--identity is required"
+  [[ -n "$SSH_HOST_FINGERPRINT" ]] || fail "--fingerprint is required"
+  [[ "$SSH_IDENTITY" = /* ]] || fail "--identity must be an absolute path"
+  [[ -r "$SSH_IDENTITY" ]] || fail "SSH identity is not readable: $SSH_IDENTITY"
+fi
+
+if [[ "$LEGACY_MODE" -eq 1 && -z "$SERVER_API_HOST" ]]; then
   SERVER_API_HOST="$SSH_HOST"
 fi
 
-[[ "$SSH_HOST" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$ ]] \
-  || fail "--host must be a Tailscale IPv4 address in 100.64.0.0/10"
-[[ "$SERVER_API_HOST" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$ ]] \
-  || fail "--api-host must be a Tailscale IPv4 address in 100.64.0.0/10"
-[[ "$SSH_USER" =~ ^[A-Za-z0-9._-]+$ ]] || fail "--user contains unsupported characters"
-[[ "$SSH_PORT" =~ ^[0-9]+$ && "$SSH_PORT" -ge 1 && "$SSH_PORT" -le 65535 ]] \
-  || fail "--ssh-port must be between 1 and 65535"
-[[ "$SERVER_API_PORT" =~ ^[0-9]+$ && "$SERVER_API_PORT" -ge 1 && "$SERVER_API_PORT" -le 65535 ]] \
-  || fail "--api-port must be between 1 and 65535"
+if [[ "$LEGACY_MODE" -eq 1 ]]; then
+  [[ "$SSH_HOST" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$ ]] \
+    || fail "--host must be a Tailscale IPv4 address in 100.64.0.0/10"
+  [[ "$SERVER_API_HOST" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$ ]] \
+    || fail "--api-host must be a Tailscale IPv4 address in 100.64.0.0/10"
+fi
+if [[ "$LEGACY_MODE" -eq 1 ]]; then
+  [[ "$SSH_USER" =~ ^[A-Za-z0-9._-]+$ ]] || fail "--user contains unsupported characters"
+  [[ "$SSH_PORT" =~ ^[0-9]+$ && "$SSH_PORT" -ge 1 && "$SSH_PORT" -le 65535 ]] \
+    || fail "--ssh-port must be between 1 and 65535"
+  [[ "$SERVER_API_PORT" =~ ^[0-9]+$ && "$SERVER_API_PORT" -ge 1 && "$SERVER_API_PORT" -le 65535 ]] \
+    || fail "--api-port must be between 1 and 65535"
+  [[ "$SSH_HOST_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]+={0,2}$ ]] \
+    || fail "--fingerprint must be an SHA256 fingerprint"
+  [[ "$REMOTE_ENV_FILE" =~ ^/[A-Za-z0-9_./-]+$ ]] \
+    || fail "--remote-env-file must be a safe absolute path"
+fi
 [[ "$LOCAL_PORT" =~ ^[0-9]+$ && "$LOCAL_PORT" -ge 1024 && "$LOCAL_PORT" -le 65535 ]] \
   || fail "--local-port must be between 1024 and 65535"
-[[ "$SSH_HOST_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]+={0,2}$ ]] \
-  || fail "--fingerprint must be an SHA256 fingerprint"
-[[ "$REMOTE_ENV_FILE" =~ ^/[A-Za-z0-9_./-]+$ ]] \
-  || fail "--remote-env-file must be a safe absolute path"
 [[ "$CODEX_PROFILE" =~ ^[A-Za-z0-9_-]+$ ]] || fail "--profile contains unsupported characters"
 
 for dependency in codex install mkdir; do
@@ -100,8 +112,12 @@ SETUP_FILE="${LIB_DIR}/setup.sh"
 ENROLL_FILE="${LIB_DIR}/enroll.sh"
 TUNNEL_FILE="${LIB_DIR}/tunnel.sh"
 DOCTOR_FILE="${LIB_DIR}/doctor.sh"
+UPDATE_FILE="${LIB_DIR}/update.sh"
+UNINSTALL_FILE="${LIB_DIR}/uninstall.sh"
+STATE_DIR="${HOME}/.local/share/codex-via-server"
+INSTALLED_VERSION_FILE="${STATE_DIR}/VERSION"
 
-mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$CODEX_DIR" "$LIB_DIR"
+mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$CODEX_DIR" "$LIB_DIR" "$STATE_DIR"
 chmod 0700 "$CONFIG_DIR"
 
 install -m 0755 "${SCRIPT_DIR}/codex-via-server" "$LAUNCHER_FILE"
@@ -110,7 +126,11 @@ install -m 0644 "${SCRIPT_DIR}/macos/lib/setup.sh" "$SETUP_FILE"
 install -m 0644 "${SCRIPT_DIR}/macos/lib/enroll.sh" "$ENROLL_FILE"
 install -m 0644 "${SCRIPT_DIR}/macos/lib/tunnel.sh" "$TUNNEL_FILE"
 install -m 0644 "${SCRIPT_DIR}/macos/lib/doctor.sh" "$DOCTOR_FILE"
+install -m 0644 "${SCRIPT_DIR}/macos/lib/update.sh" "$UPDATE_FILE"
+install -m 0644 "${SCRIPT_DIR}/macos/lib/uninstall.sh" "$UNINSTALL_FILE"
+install -m 0644 "${SCRIPT_DIR}/VERSION" "$INSTALLED_VERSION_FILE"
 
+if [[ "$LEGACY_MODE" -eq 1 ]]; then
 {
   printf 'SSH_HOST='; shell_quote "$SSH_HOST"; printf '\n'
   printf 'SSH_PORT='; shell_quote "$SSH_PORT"; printf '\n'
@@ -142,9 +162,11 @@ stream_idle_timeout_ms = 300000
 SERVER_CODEX_API_KEY = "exclude"
 EOF
 chmod 0600 "$PROFILE_FILE"
+fi
 
 printf 'Installed launcher: %s\n' "$LAUNCHER_FILE"
 printf 'Installed config:   %s\n' "$CONFIG_FILE"
 printf 'Installed profile:  %s\n' "$PROFILE_FILE"
 printf 'Installed commands: %s\n' "$COMMANDS_FILE"
+printf 'Installed version:  %s\n' "$INSTALLED_VERSION_FILE"
 printf 'Run: codex-via-server\n'
