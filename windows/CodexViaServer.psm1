@@ -16,6 +16,7 @@ function Test-CvsVersionAtLeast {
 }
 
 function Get-CvsRoot {
+    if ($env:CODEX_VIA_SERVER_HOME) { return $env:CODEX_VIA_SERVER_HOME }
     return Join-Path $HOME ".codex-via-server"
 }
 
@@ -142,7 +143,7 @@ function Import-CvsConnectionProfile {
     Copy-Item -LiteralPath $Path -Destination $connectionTarget -Force
     Set-CvsPrivateAcl $connectionTarget
 
-    $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path $HOME ".codex" }
+    $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path (Get-CvsRoot) ".codex" }
     New-Item -ItemType Directory -Force -Path $codexHome | Out-Null
     $codexTarget = Join-Path $codexHome "$($profile.client.codex_profile).config.toml"
     $toml = @"

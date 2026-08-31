@@ -1,14 +1,13 @@
 BeforeAll {
     $script:RepositoryRoot = (Resolve-Path (Join-Path $PSScriptRoot "../..")).Path
     Import-Module (Join-Path $script:RepositoryRoot "windows/CodexViaServer.psm1") -Force
-    $script:OriginalHome = $HOME
     $script:TestHome = Join-Path $TestDrive "home"
     New-Item -ItemType Directory -Force -Path $script:TestHome | Out-Null
-    $global:HOME = $script:TestHome
+    $env:CODEX_VIA_SERVER_HOME = $script:TestHome
 }
 
 AfterAll {
-    $global:HOME = $script:OriginalHome
+    Remove-Item Env:CODEX_VIA_SERVER_HOME -ErrorAction SilentlyContinue
 }
 
 Describe "Windows setup and enrollment" {
