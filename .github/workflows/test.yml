@@ -21,12 +21,12 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
 
       - name: Set up Node.js
-        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
         with:
           node-version: 22.22.3
           cache: npm
@@ -57,4 +57,16 @@ jobs:
       - name: Run Windows setup and enrollment tests
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Invoke-Pester ./windows/tests/Setup.Tests.ps1 -CI
+        run: |
+          $configuration = New-PesterConfiguration
+          $configuration.Run.Path = './windows/tests/Setup.Tests.ps1'
+          $configuration.Run.PassThru = $true
+          $configuration.Output.Verbosity = 'Detailed'
+          $result = Invoke-Pester -Configuration $configuration
+          if ($result.FailedCount -gt 0) {
+            foreach ($failed in $result.Failed) {
+              $message = ($failed.ErrorRecord | Out-String).Replace("`r", ' ').Replace("`n", ' ')
+              Write-Output "::error file=windows/tests/Setup.Tests.ps1,title=$($failed.Name)::$message"
+            }
+            exit 1
+          }
