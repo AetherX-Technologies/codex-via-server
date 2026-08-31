@@ -1,0 +1,189 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+umask 077
+
+PROGRAM_NAME="codex-via-server"
+CONFIG_FILE="${CODEX_VIA_SERVER_CONFIG:-${HOME}/.config/codex-via-server/config}"
+RUNTIME_DIR=""
+CONTROL_SOCKET=""
+SSH_MASTER_STARTED=0
+SERVER_CODEX_API_KEY=""
+
+fail() {
+  printf '%s: %s\n' "$PROGRAM_NAME" "$*" >&2
+  exit 1
+}
+
+cleanup() {
+  exit_status=$?
+  trap - EXIT HUP INT TERM
+
+  if [[ "$SSH_MASTER_STARTED" -eq 1 && -n "$CONTROL_SOCKET" ]]; then
+    "${SSH_COMMAND[@]}" -S "$CONTROL_SOCKET" -O exit "$SSH_TARGET" \
+      >/dev/null 2>&1 || true
+  fi
+
+  unset SERVER_CODEX_API_KEY
+
+  if [[ -n "$RUNTIME_DIR" ]]; then
+    case "$RUNTIME_DIR" in
+      */codex-via-server.*) rm -rf -- "$RUNTIME_DIR" ;;
+      *) printf '%s: refusing to remove unexpected runtime path: %s\n' \
+           "$PROGRAM_NAME" "$RUNTIME_DIR" >&2 ;;
+    esac
+  fi
+
+  exit "$exit_status"
+}
+
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+[[ -r "$CONFIG_FILE" ]] || fail "configuration is missing: $CONFIG_FILE"
+
+source "$CONFIG_FILE"
+
+required_variables=(
+  SSH_HOST
+  SSH_PORT
+  SSH_USER
+  SSH_IDENTITY
+  SSH_HOST_FINGERPRINT
+  SERVER_API_HOST
+  SERVER_API_PORT
+  REMOTE_ENV_FILE
+  LOCAL_PORT
+  CODEX_PROFILE
+)
+
+for variable_name in "${required_variables[@]}"; do
+  [[ -n "${!variable_name:-}" ]] || fail "missing configuration value: $variable_name"
+done
+
+[[ "$SSH_HOST" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$ ]] \
+  || fail "SSH_HOST must be a Tailscale IPv4 address in 100.64.0.0/10"
+[[ "$SERVER_API_HOST" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}$ ]] \
+  || fail "SERVER_API_HOST must be a Tailscale IPv4 address in 100.64.0.0/10"
+[[ "$SSH_USER" =~ ^[A-Za-z0-9._-]+$ ]] || fail "SSH_USER contains unsupported characters"
+[[ "$SSH_PORT" =~ ^[0-9]+$ && "$SSH_PORT" -ge 1 && "$SSH_PORT" -le 65535 ]] \
+  || fail "SSH_PORT must be between 1 and 65535"
+[[ "$SERVER_API_PORT" =~ ^[0-9]+$ && "$SERVER_API_PORT" -ge 1 && "$SERVER_API_PORT" -le 65535 ]] \
+  || fail "SERVER_API_PORT must be between 1 and 65535"
+[[ "$LOCAL_PORT" =~ ^[0-9]+$ && "$LOCAL_PORT" -ge 1024 && "$LOCAL_PORT" -le 65535 ]] \
+  || fail "LOCAL_PORT must be between 1024 and 65535"
+[[ "$SSH_HOST_FINGERPRINT" =~ ^SHA256:[A-Za-z0-9+/]+={0,2}$ ]] \
+  || fail "SSH_HOST_FINGERPRINT must be an SHA256 fingerprint"
+[[ "$SSH_IDENTITY" = /* && -r "$SSH_IDENTITY" ]] || fail "SSH identity is not readable: $SSH_IDENTITY"
+[[ "$REMOTE_ENV_FILE" =~ ^/[A-Za-z0-9_./-]+$ ]] \
+  || fail "REMOTE_ENV_FILE must be a safe absolute path"
+[[ "$CODEX_PROFILE" =~ ^[A-Za-z0-9_-]+$ ]] || fail "CODEX_PROFILE contains unsupported characters"
+
+for dependency in awk curl head mktemp route sed ssh ssh-keygen ssh-keyscan; do
+  command -v "$dependency" >/dev/null 2>&1 || fail "required command is missing: $dependency"
+done
+
+CODEX_BINARY="${CODEX_BINARY:-$(command -v codex || true)}"
+[[ -n "$CODEX_BINARY" && -x "$CODEX_BINARY" ]] || fail "official Codex CLI was not found in PATH"
+
+PROFILE_FILE="${CODEX_HOME:-${HOME}/.codex}/${CODEX_PROFILE}.config.toml"
+[[ -r "$PROFILE_FILE" ]] || fail "Codex profile is missing: $PROFILE_FILE"
+
+route_output="$(route -n get "$SSH_HOST" 2>/dev/null)" \
+  || fail "no route to Tailscale server; connect Tailscale first"
+route_interface="$(printf '%s\n' "$route_output" | awk '/interface:/{print $2; exit}')"
+case "$route_interface" in
+  utun*) ;;
+  *) fail "$SSH_HOST is routed through ${route_interface:-an unknown interface}, not Tailscale utun" ;;
+esac
+
+if command -v lsof >/dev/null 2>&1 && \
+   lsof -nP -iTCP:"$LOCAL_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  fail "local port $LOCAL_PORT is already in use"
+fi
+
+RUNTIME_DIR="$(mktemp -d "/tmp/codex-via-server.XXXXXX")"
+CONTROL_SOCKET="${RUNTIME_DIR}/control"
+SCANNED_HOST_KEYS="${RUNTIME_DIR}/known_hosts.scanned"
+VERIFIED_HOST_KEYS="${RUNTIME_DIR}/known_hosts"
+KEY_CANDIDATE="${RUNTIME_DIR}/key.candidate"
+
+ssh-keyscan -T 5 -p "$SSH_PORT" "$SSH_HOST" >"$SCANNED_HOST_KEYS" 2>/dev/null \
+  || fail "could not read the server SSH host key over Tailscale"
+
+while IFS= read -r host_key_line; do
+  case "$host_key_line" in
+    ''|'#'*) continue ;;
+  esac
+  printf '%s\n' "$host_key_line" >"$KEY_CANDIDATE"
+  candidate_fingerprint="$(ssh-keygen -lf "$KEY_CANDIDATE" -E sha256 2>/dev/null \
+    | awk 'NR == 1 {print $2}')"
+  if [[ "$candidate_fingerprint" == "$SSH_HOST_FINGERPRINT" ]]; then
+    printf '%s\n' "$host_key_line" >>"$VERIFIED_HOST_KEYS"
+  fi
+done <"$SCANNED_HOST_KEYS"
+
+[[ -s "$VERIFIED_HOST_KEYS" ]] \
+  || fail "server SSH fingerprint changed; verify it in the server console before updating configuration"
+
+SSH_TARGET="${SSH_USER}@${SSH_HOST}"
+SSH_COMMAND=(
+  ssh
+  -F /dev/null
+  -p "$SSH_PORT"
+  -i "$SSH_IDENTITY"
+  -o BatchMode=yes
+  -o IdentitiesOnly=yes
+  -o PasswordAuthentication=no
+  -o KbdInteractiveAuthentication=no
+  -o StrictHostKeyChecking=yes
+  -o UserKnownHostsFile="$VERIFIED_HOST_KEYS"
+  -o GlobalKnownHostsFile=/dev/null
+  -o UpdateHostKeys=no
+  -o ProxyCommand=none
+  -o ProxyJump=none
+  -o ConnectTimeout=8
+  -o ConnectionAttempts=1
+  -o ServerAliveInterval=15
+  -o ServerAliveCountMax=3
+  -o TCPKeepAlive=yes
+  -o LogLevel=ERROR
+)
+
+printf 'Opening private Codex tunnel through Tailscale...\n'
+if ! "${SSH_COMMAND[@]}" \
+    -M \
+    -S "$CONTROL_SOCKET" \
+    -o ControlPersist=no \
+    -o ExitOnForwardFailure=yes \
+    -fN \
+    -L "127.0.0.1:${LOCAL_PORT}:${SERVER_API_HOST}:${SERVER_API_PORT}" \
+    "$SSH_TARGET"; then
+  fail "could not establish the SSH tunnel"
+fi
+SSH_MASTER_STARTED=1
+
+"${SSH_COMMAND[@]}" -S "$CONTROL_SOCKET" -O check "$SSH_TARGET" \
+  >/dev/null 2>&1 || fail "SSH tunnel did not remain active"
+
+if ! SERVER_CODEX_API_KEY="$(
+    "${SSH_COMMAND[@]}" -S "$CONTROL_SOCKET" "$SSH_TARGET" \
+      "sed -n 's/^CLIPROXY_API_KEY=//p' '$REMOTE_ENV_FILE' | head -n 1"
+  )"; then
+  fail "server API key could not be read over the SSH tunnel"
+fi
+
+[[ -n "$SERVER_CODEX_API_KEY" && "$SERVER_CODEX_API_KEY" != *$'\n'* ]] \
+  || fail "server API key could not be read"
+
+if ! printf 'Authorization: Bearer %s\n' "$SERVER_CODEX_API_KEY" \
+  | curl --proxy '' --noproxy '*' --connect-timeout 5 --max-time 15 \
+      -fsS -o /dev/null -H @- "http://127.0.0.1:${LOCAL_PORT}/v1/models"; then
+  fail "CLIProxyAPI rejected the tunneled health check"
+fi
+
+printf 'Tunnel ready. Starting local official Codex with profile %s.\n' "$CODEX_PROFILE"
+export SERVER_CODEX_API_KEY
+"$CODEX_BINARY" --profile "$CODEX_PROFILE" "$@"
