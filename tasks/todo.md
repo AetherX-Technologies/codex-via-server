@@ -11,7 +11,7 @@
 
 - [x] Task 4: Create the loopback credential gateway template
 - [x] Task 5: Create the restricted SSH account template
-- [ ] Task 6: Build the idempotent server installer
+- [x] Task 6: Build the idempotent server installer
 - [ ] Task 7: Implement administrator device lifecycle
 - [ ] Task 8: Implement server doctor and private canary
 - [ ] Task 9: Implement transactional CLIProxyAPI upgrades
