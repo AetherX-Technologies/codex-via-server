@@ -5,6 +5,7 @@ umask 077
 
 PROGRAM_NAME="codex-via-server"
 CONFIG_FILE="${CODEX_VIA_SERVER_CONFIG:-${HOME}/.config/codex-via-server/config}"
+COMMANDS_FILE="${CODEX_VIA_SERVER_COMMANDS_FILE:-${HOME}/.local/lib/codex-via-server/commands.sh}"
 RUNTIME_DIR=""
 CONTROL_SOCKET=""
 SSH_MASTER_STARTED=0
@@ -41,6 +42,14 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+
+if [[ -r "$COMMANDS_FILE" ]]; then
+  source "$COMMANDS_FILE"
+  if [[ $# -gt 0 ]] && is_codex_via_server_command "$1"; then
+    run_codex_via_server_command "$@"
+    exit $?
+  fi
+fi
 
 [[ -r "$CONFIG_FILE" ]] || fail "configuration is missing: $CONFIG_FILE"
 

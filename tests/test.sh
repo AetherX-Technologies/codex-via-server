@@ -33,6 +33,7 @@ file_mode() {
 
 bash -n "${ROOT_DIR}/codex-via-server"
 bash -n "${ROOT_DIR}/install.sh"
+bash -n "${ROOT_DIR}/macos/lib/commands.sh"
 
 FAKE_BIN="${TEST_ROOT}/bin"
 FAKE_HOME="${TEST_ROOT}/home"
@@ -58,13 +59,24 @@ PATH="${FAKE_BIN}:${PATH}" HOME="$FAKE_HOME" \
 LAUNCHER="${FAKE_HOME}/.local/bin/codex-via-server"
 CONFIG="${FAKE_HOME}/.config/codex-via-server/config"
 PROFILE="${FAKE_HOME}/.codex/codex-via-server.config.toml"
+COMMANDS="${FAKE_HOME}/.local/lib/codex-via-server/commands.sh"
 
 [[ -x "$LAUNCHER" ]] || fail "launcher was not installed"
 [[ -f "$CONFIG" ]] || fail "client config was not installed"
 [[ -f "$PROFILE" ]] || fail "Codex profile was not installed"
+[[ -f "$COMMANDS" ]] || fail "command dispatcher was not installed"
 [[ "$(file_mode "$LAUNCHER")" == "755" ]] || fail "launcher mode is not 755"
 [[ "$(file_mode "$CONFIG")" == "600" ]] || fail "config mode is not 600"
 [[ "$(file_mode "$PROFILE")" == "600" ]] || fail "profile mode is not 600"
+[[ "$(file_mode "$COMMANDS")" == "644" ]] || fail "command dispatcher mode is not 644"
+
+help_output="$(HOME="$FAKE_HOME" bash "$LAUNCHER" help)"
+printf '%s\n' "$help_output" | grep -q 'codex-via-server setup'
+set +e
+HOME="$FAKE_HOME" bash "$LAUNCHER" setup >/dev/null 2>&1
+setup_status=$?
+set -e
+[[ "$setup_status" == "69" ]]
 
 assert_contains "$CONFIG" 'SSH_HOST=100.64.0.10'
 assert_contains "$CONFIG" 'SERVER_API_PORT=8317'

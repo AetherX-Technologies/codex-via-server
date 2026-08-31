@@ -19,7 +19,7 @@
 
 ## Phase 3: macOS
 
-- [ ] Task 10: Refactor the macOS launcher into subcommands
+- [x] Task 10: Refactor the macOS launcher into subcommands
 - [ ] Task 11: Implement macOS setup and enrollment requests
 - [ ] Task 12: Implement macOS connection-profile import
 - [ ] Task 13: Implement macOS doctor and no-secret launcher

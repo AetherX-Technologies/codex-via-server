@@ -94,11 +94,14 @@ CODEX_DIR="${CODEX_HOME:-${HOME}/.codex}"
 CONFIG_FILE="${CONFIG_DIR}/config"
 PROFILE_FILE="${CODEX_DIR}/${CODEX_PROFILE}.config.toml"
 LAUNCHER_FILE="${BIN_DIR}/codex-via-server"
+LIB_DIR="${HOME}/.local/lib/codex-via-server"
+COMMANDS_FILE="${LIB_DIR}/commands.sh"
 
-mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$CODEX_DIR"
+mkdir -p "$BIN_DIR" "$CONFIG_DIR" "$CODEX_DIR" "$LIB_DIR"
 chmod 0700 "$CONFIG_DIR"
 
 install -m 0755 "${SCRIPT_DIR}/codex-via-server" "$LAUNCHER_FILE"
+install -m 0644 "${SCRIPT_DIR}/macos/lib/commands.sh" "$COMMANDS_FILE"
 
 {
   printf 'SSH_HOST='; shell_quote "$SSH_HOST"; printf '\n'
@@ -135,4 +138,5 @@ chmod 0600 "$PROFILE_FILE"
 printf 'Installed launcher: %s\n' "$LAUNCHER_FILE"
 printf 'Installed config:   %s\n' "$CONFIG_FILE"
 printf 'Installed profile:  %s\n' "$PROFILE_FILE"
+printf 'Installed commands: %s\n' "$COMMANDS_FILE"
 printf 'Run: codex-via-server\n'
