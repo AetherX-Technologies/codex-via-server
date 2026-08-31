@@ -13,7 +13,7 @@
 - [x] Task 5: Create the restricted SSH account template
 - [x] Task 6: Build the idempotent server installer
 - [x] Task 7: Implement administrator device lifecycle
-- [ ] Task 8: Implement server doctor and private canary
+- [x] Task 8: Implement server doctor and private canary
 - [ ] Task 9: Implement transactional CLIProxyAPI upgrades
 - [ ] Checkpoint B: Disposable server security and rollback tests pass
 

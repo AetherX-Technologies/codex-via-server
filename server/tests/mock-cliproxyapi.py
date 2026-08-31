@@ -1,9 +1,10 @@
 import json
+import os
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-EXPECTED_AUTHORIZATION = "Bearer test-upstream-key"
+EXPECTED_AUTHORIZATION = os.environ.get("EXPECTED_AUTHORIZATION", "Bearer test-upstream-key")
 
 
 class Handler(BaseHTTPRequestHandler):

@@ -24,6 +24,12 @@ RESTRICTED_USER_INSTALLER="${SCRIPT_DIR}/install-restricted-user.sh"
 DEVICE_TOOL_SOURCE="${SCRIPT_DIR}/codex-via-server-devices"
 DEVICE_TOOL_TARGET="/usr/local/sbin/codex-via-server-devices"
 DEVICE_STATE_DIR="/var/lib/codex-via-server/devices"
+DOCTOR_SOURCE="${SCRIPT_DIR}/doctor.sh"
+DOCTOR_TARGET="/usr/local/sbin/codex-via-server-doctor"
+CANARY_SOURCE="${SCRIPT_DIR}/canary.sh"
+CANARY_TARGET="/usr/local/sbin/codex-via-server-canary"
+CANARY_SERVICE_SOURCE="${SCRIPT_DIR}/systemd/codex-via-server-canary.service"
+CANARY_SERVICE_TARGET="/etc/systemd/system/codex-via-server-canary.service"
 
 usage() {
   cat <<'EOF'
@@ -62,6 +68,9 @@ done
 [[ -r "$NGINX_CONFIG_SOURCE" ]] || fail "missing Nginx configuration template"
 [[ -x "$RESTRICTED_USER_INSTALLER" ]] || fail "missing restricted-user installer"
 [[ -x "$DEVICE_TOOL_SOURCE" ]] || fail "missing device lifecycle tool"
+[[ -x "$DOCTOR_SOURCE" ]] || fail "missing server doctor"
+[[ -x "$CANARY_SOURCE" ]] || fail "missing server canary"
+[[ -r "$CANARY_SERVICE_SOURCE" ]] || fail "missing canary systemd unit"
 [[ -x "$NGINX_BINARY" ]] || fail "missing Nginx binary: $NGINX_BINARY"
 [[ -x "$SSHD_BINARY" ]] || fail "missing SSH daemon: $SSHD_BINARY"
 
@@ -85,6 +94,7 @@ if [[ "$DRY_RUN" -eq 1 ]]; then
   printf 'Dry run passed. Planned targets:\n'
   printf '  %s\n' "$NGINX_CONFIG_TARGET" "$SECRET_TARGET" "$SSHD_CONFIG_TARGET"
   printf '  %s\n' "$DEVICE_TOOL_TARGET" "$DEVICE_STATE_DIR"
+  printf '  %s\n' "$DOCTOR_TARGET" "$CANARY_TARGET" "$CANARY_SERVICE_TARGET"
   exit 0
 fi
 
@@ -125,6 +135,9 @@ rollback() {
     restore_path "$SECRET_TARGET" gateway-secret.conf
     restore_path "$SSHD_CONFIG_TARGET" sshd.conf
     restore_path "$DEVICE_TOOL_TARGET" device-tool
+    restore_path "$DOCTOR_TARGET" doctor
+    restore_path "$CANARY_TARGET" canary
+    restore_path "$CANARY_SERVICE_TARGET" canary-service
     "$NGINX_BINARY" -t >/dev/null 2>&1 || true
     "$SSHD_BINARY" -t >/dev/null 2>&1 || true
 
@@ -150,10 +163,16 @@ backup_path "$NGINX_CONFIG_TARGET" nginx.conf
 backup_path "$SECRET_TARGET" gateway-secret.conf
 backup_path "$SSHD_CONFIG_TARGET" sshd.conf
 backup_path "$DEVICE_TOOL_TARGET" device-tool
+backup_path "$DOCTOR_TARGET" doctor
+backup_path "$CANARY_TARGET" canary
+backup_path "$CANARY_SERVICE_TARGET" canary-service
 
 "$RESTRICTED_USER_INSTALLER"
 install -d -o root -g root -m 0700 "$DEVICE_STATE_DIR"
 install -o root -g root -m 0750 "$DEVICE_TOOL_SOURCE" "$DEVICE_TOOL_TARGET"
+install -o root -g root -m 0750 "$DOCTOR_SOURCE" "$DOCTOR_TARGET"
+install -o root -g root -m 0750 "$CANARY_SOURCE" "$CANARY_TARGET"
+install -o root -g root -m 0644 "$CANARY_SERVICE_SOURCE" "$CANARY_SERVICE_TARGET"
 
 install -d -o root -g root -m 0700 "$SECRET_DIR"
 install -o root -g root -m 0644 "$NGINX_CONFIG_SOURCE" "$NGINX_CONFIG_TARGET"
@@ -165,6 +184,7 @@ printf 'proxy_set_header Authorization "Bearer %s";\n' "$API_KEY" \
 
 if [[ "$RELOAD_SERVICES" -eq 1 ]]; then
   [[ -x "$SYSTEMCTL_BINARY" ]] || fail "missing systemctl: $SYSTEMCTL_BINARY"
+  "$SYSTEMCTL_BINARY" daemon-reload
   "$SYSTEMCTL_BINARY" reload nginx
   reload_ssh
 fi
