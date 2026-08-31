@@ -147,4 +147,48 @@ fi
 "${SSH_COMMAND[@]}" -S "$DENIED_CONTROL" -O exit "$SSH_TARGET" >/dev/null 2>&1 || true
 "${SSH_COMMAND[@]}" -S "$ALLOWED_CONTROL" -O exit "$SSH_TARGET" >/dev/null 2>&1
 
+device_list="$(docker exec "$CONTAINER_NAME" /app/server/codex-via-server-devices list)"
+[[ "$(printf '%s\n' "$device_list" | jq -r 'length')" == "1" ]]
+[[ "$(printf '%s\n' "$device_list" | jq -r '.[0].device_id')" == "test-device" ]]
+
+if docker exec "$CONTAINER_NAME" \
+    /app/server/codex-via-server-devices approve /run/test-request.json \
+    >/dev/null 2>&1; then
+  printf 'duplicate device approval succeeded\n' >&2
+  exit 1
+fi
+
+docker exec "$CONTAINER_NAME" bash -c '
+  set -euo pipefail
+  ssh-keygen -q -t ed25519 -N "" -C second-device -f /run/second-device
+  requested_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  jq -n \
+    --arg public_key "$(cat /run/second-device.pub)" \
+    --arg requested_at "$requested_at" \
+    '\''{schema_version: 1, device_id: "second-device", platform: "windows", public_key: $public_key, requested_at: $requested_at}'\'' \
+    >/run/second-request.json
+  /app/server/codex-via-server-devices approve /run/second-request.json >/dev/null
+'
+
+[[ "$(docker exec "$CONTAINER_NAME" /app/server/codex-via-server-devices list | jq -r 'length')" == "2" ]]
+docker exec "$CONTAINER_NAME" /app/server/codex-via-server-devices revoke test-device >/dev/null
+remaining_devices="$(docker exec "$CONTAINER_NAME" /app/server/codex-via-server-devices list)"
+[[ "$(printf '%s\n' "$remaining_devices" | jq -r 'length')" == "1" ]]
+[[ "$(printf '%s\n' "$remaining_devices" | jq -r '.[0].device_id')" == "second-device" ]]
+docker exec "$CONTAINER_NAME" grep -q 'codex-via-server:second-device$' /etc/ssh/authorized_keys/codex-tunnel
+if docker exec "$CONTAINER_NAME" grep -q 'codex-via-server:test-device$' /etc/ssh/authorized_keys/codex-tunnel; then
+  printf 'revoked device record remained in authorized_keys\n' >&2
+  exit 1
+fi
+
+revoked_port="$(available_port)"
+if "${SSH_COMMAND[@]}" \
+    -o ExitOnForwardFailure=yes \
+    -N -f \
+    -L "127.0.0.1:${revoked_port}:127.0.0.1:18319" \
+    "$SSH_TARGET" >/dev/null 2>&1; then
+  printf 'revoked key established a new forward\n' >&2
+  exit 1
+fi
+
 printf 'PASS: restricted SSH permits one local forward and denies other capabilities\n'

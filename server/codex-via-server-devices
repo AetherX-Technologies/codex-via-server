@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+umask 077
+
+PROGRAM_NAME="codex-via-server-devices"
+TUNNEL_GROUP="${CODEX_TUNNEL_GROUP:-codex-tunnel}"
+AUTHORIZED_KEYS_FILE="${CODEX_AUTHORIZED_KEYS_FILE:-/etc/ssh/authorized_keys/codex-tunnel}"
+STATE_DIR="${CODEX_DEVICE_STATE_DIR:-/var/lib/codex-via-server/devices}"
+LOCK_FILE="${CODEX_DEVICE_LOCK_FILE:-/run/lock/codex-via-server-devices.lock}"
+PERMITTED_DESTINATION="127.0.0.1:18319"
+TRANSACTION_ACTIVE=0
+BACKUP_AUTHORIZED_KEYS=""
+BACKUP_METADATA=""
+METADATA_PATH=""
+
+fail() {
+  printf '%s: %s\n' "$PROGRAM_NAME" "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'EOF'
+Usage:
+  codex-via-server-devices approve <request.json|->
+  codex-via-server-devices list
+  codex-via-server-devices revoke <device-id>
+EOF
+}
+
+validate_device_id() {
+  [[ "$1" =~ ^[a-z0-9][a-z0-9._-]{1,62}[a-z0-9]$ ]]
+}
+
+restore_transaction() {
+  exit_status=$?
+  trap - EXIT HUP INT TERM
+
+  if [[ "$TRANSACTION_ACTIVE" -eq 1 ]]; then
+    if [[ -n "$BACKUP_AUTHORIZED_KEYS" && -e "$BACKUP_AUTHORIZED_KEYS" ]]; then
+      install -o root -g "$TUNNEL_GROUP" -m 0640 "$BACKUP_AUTHORIZED_KEYS" "$AUTHORIZED_KEYS_FILE"
+    fi
+
+    if [[ -n "$METADATA_PATH" ]]; then
+      if [[ -n "$BACKUP_METADATA" && -e "$BACKUP_METADATA" ]]; then
+        install -o root -g root -m 0600 "$BACKUP_METADATA" "$METADATA_PATH"
+      else
+        rm -f -- "$METADATA_PATH"
+      fi
+    fi
+  fi
+
+  exit "$exit_status"
+}
+
+require_root_and_tools() {
+  [[ "${EUID}" -eq 0 ]] || fail "run as root"
+
+  for dependency in awk cat cp date flock getent grep install jq mktemp rm ssh-keygen; do
+    command -v "$dependency" >/dev/null 2>&1 || fail "missing command: $dependency"
+  done
+
+  getent group "$TUNNEL_GROUP" >/dev/null || fail "missing tunnel group: $TUNNEL_GROUP"
+  [[ -f "$AUTHORIZED_KEYS_FILE" && ! -L "$AUTHORIZED_KEYS_FILE" ]] \
+    || fail "authorized keys file is missing or unsafe"
+
+  install -d -o root -g root -m 0700 "$STATE_DIR"
+  install -d -o root -g root -m 0755 "$(dirname "$LOCK_FILE")"
+}
+
+approve_device() {
+  request_source="$1"
+  runtime_dir="$(mktemp -d /tmp/codex-device-approve.XXXXXX)"
+  request_file="${runtime_dir}/request.json"
+  public_key_file="${runtime_dir}/public-key.pub"
+  next_authorized_keys="${runtime_dir}/authorized_keys.next"
+  next_metadata="${runtime_dir}/metadata.next"
+
+  trap 'find "$runtime_dir" -depth -delete' RETURN
+
+  if [[ "$request_source" == "-" ]]; then
+    cat >"$request_file"
+  else
+    [[ -f "$request_source" && ! -L "$request_source" ]] || fail "request must be a regular non-symlink file"
+    cp "$request_source" "$request_file"
+  fi
+
+  jq -e '
+    type == "object" and
+    (keys | sort) == ["device_id", "platform", "public_key", "requested_at", "schema_version"] and
+    .schema_version == 1 and
+    (.device_id | type == "string") and
+    (.platform == "macos" or .platform == "windows") and
+    (.public_key | type == "string") and
+    (.requested_at | fromdateiso8601 | type == "number")
+  ' "$request_file" >/dev/null || fail "invalid enrollment request"
+
+  device_id="$(jq -r '.device_id' "$request_file")"
+  platform="$(jq -r '.platform' "$request_file")"
+  public_key="$(jq -r '.public_key' "$request_file")"
+  requested_at="$(jq -r '.requested_at' "$request_file")"
+  validate_device_id "$device_id" || fail "invalid device id"
+
+  read -r key_type key_blob key_comment key_extra <<<"$public_key"
+  [[ "$key_type" == "ssh-ed25519" && -n "$key_blob" && -z "${key_extra:-}" ]] \
+    || fail "only one-token-comment Ed25519 public keys are accepted"
+  printf '%s %s\n' "$key_type" "$key_blob" >"$public_key_file"
+  public_key_fingerprint="$(ssh-keygen -lf "$public_key_file" -E sha256 | awk 'NR == 1 {print $2}')"
+  [[ "$public_key_fingerprint" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || fail "invalid public key fingerprint"
+
+  METADATA_PATH="${STATE_DIR}/${device_id}.json"
+  [[ ! -e "$METADATA_PATH" ]] || fail "device id is already approved"
+  if grep -Fq -- " ${key_blob} " "$AUTHORIZED_KEYS_FILE"; then
+    fail "public key is already approved"
+  fi
+
+  BACKUP_AUTHORIZED_KEYS="${runtime_dir}/authorized_keys.backup"
+  cp -p "$AUTHORIZED_KEYS_FILE" "$BACKUP_AUTHORIZED_KEYS"
+  cp "$AUTHORIZED_KEYS_FILE" "$next_authorized_keys"
+  printf 'restrict,port-forwarding,permitopen="%s" %s %s codex-via-server:%s\n' \
+    "$PERMITTED_DESTINATION" "$key_type" "$key_blob" "$device_id" \
+    >>"$next_authorized_keys"
+
+  approved_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  jq -n \
+    --arg device_id "$device_id" \
+    --arg platform "$platform" \
+    --arg public_key_fingerprint "$public_key_fingerprint" \
+    --arg requested_at "$requested_at" \
+    --arg approved_at "$approved_at" \
+    '{
+      schema_version: 1,
+      device_id: $device_id,
+      platform: $platform,
+      public_key_fingerprint: $public_key_fingerprint,
+      requested_at: $requested_at,
+      approved_at: $approved_at
+    }' >"$next_metadata"
+
+  TRANSACTION_ACTIVE=1
+  trap restore_transaction EXIT HUP INT TERM
+  install -o root -g root -m 0600 "$next_metadata" "$METADATA_PATH"
+  install -o root -g "$TUNNEL_GROUP" -m 0640 "$next_authorized_keys" "$AUTHORIZED_KEYS_FILE"
+  TRANSACTION_ACTIVE=0
+  trap - EXIT HUP INT TERM
+
+  jq -n \
+    --arg status approved \
+    --arg device_id "$device_id" \
+    --arg platform "$platform" \
+    --arg public_key_fingerprint "$public_key_fingerprint" \
+    --arg approved_at "$approved_at" \
+    '{status: $status, device_id: $device_id, platform: $platform, public_key_fingerprint: $public_key_fingerprint, approved_at: $approved_at}'
+}
+
+list_devices() {
+  files=("$STATE_DIR"/*.json)
+
+  if [[ ! -e "${files[0]}" ]]; then
+    printf '[]\n'
+    return
+  fi
+
+  jq -s 'sort_by(.device_id)' "${files[@]}"
+}
+
+revoke_device() {
+  device_id="$1"
+  validate_device_id "$device_id" || fail "invalid device id"
+  METADATA_PATH="${STATE_DIR}/${device_id}.json"
+  [[ -f "$METADATA_PATH" && ! -L "$METADATA_PATH" ]] || fail "device is not approved"
+
+  runtime_dir="$(mktemp -d /tmp/codex-device-revoke.XXXXXX)"
+  next_authorized_keys="${runtime_dir}/authorized_keys.next"
+  marker="codex-via-server:${device_id}"
+  trap 'find "$runtime_dir" -depth -delete' RETURN
+
+  matching_lines="$(awk -v marker="$marker" '$NF == marker {count += 1} END {print count + 0}' "$AUTHORIZED_KEYS_FILE")"
+  [[ "$matching_lines" == "1" ]] || fail "authorized key record is missing or duplicated"
+  awk -v marker="$marker" '$NF != marker' "$AUTHORIZED_KEYS_FILE" >"$next_authorized_keys"
+
+  BACKUP_AUTHORIZED_KEYS="${runtime_dir}/authorized_keys.backup"
+  BACKUP_METADATA="${runtime_dir}/metadata.backup"
+  cp -p "$AUTHORIZED_KEYS_FILE" "$BACKUP_AUTHORIZED_KEYS"
+  cp -p "$METADATA_PATH" "$BACKUP_METADATA"
+
+  TRANSACTION_ACTIVE=1
+  trap restore_transaction EXIT HUP INT TERM
+  install -o root -g "$TUNNEL_GROUP" -m 0640 "$next_authorized_keys" "$AUTHORIZED_KEYS_FILE"
+  rm -f -- "$METADATA_PATH"
+  TRANSACTION_ACTIVE=0
+  trap - EXIT HUP INT TERM
+
+  jq -n --arg status revoked --arg device_id "$device_id" '{status: $status, device_id: $device_id}'
+}
+
+require_root_and_tools
+exec 9>"$LOCK_FILE"
+flock -x 9
+
+command_name="${1:-}"
+case "$command_name" in
+  approve)
+    [[ $# -eq 2 ]] || fail "approve requires one request path or -"
+    approve_device "$2"
+    ;;
+  list)
+    [[ $# -eq 1 ]] || fail "list accepts no arguments"
+    list_devices
+    ;;
+  revoke)
+    [[ $# -eq 2 ]] || fail "revoke requires one device id"
+    revoke_device "$2"
+    ;;
+  -h|--help|help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

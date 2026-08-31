@@ -21,6 +21,9 @@ SECRET_TARGET="${SECRET_DIR}/gateway-secret.conf"
 SSHD_CONFIG_TARGET="/etc/ssh/sshd_config.d/90-codex-via-server.conf"
 BACKUP_ROOT="/var/backups/codex-via-server"
 RESTRICTED_USER_INSTALLER="${SCRIPT_DIR}/install-restricted-user.sh"
+DEVICE_TOOL_SOURCE="${SCRIPT_DIR}/codex-via-server-devices"
+DEVICE_TOOL_TARGET="/usr/local/sbin/codex-via-server-devices"
+DEVICE_STATE_DIR="/var/lib/codex-via-server/devices"
 
 usage() {
   cat <<'EOF'
@@ -58,6 +61,7 @@ done
 [[ -f "$API_KEY_FILE" && ! -L "$API_KEY_FILE" ]] || fail "API key file must be a regular non-symlink file"
 [[ -r "$NGINX_CONFIG_SOURCE" ]] || fail "missing Nginx configuration template"
 [[ -x "$RESTRICTED_USER_INSTALLER" ]] || fail "missing restricted-user installer"
+[[ -x "$DEVICE_TOOL_SOURCE" ]] || fail "missing device lifecycle tool"
 [[ -x "$NGINX_BINARY" ]] || fail "missing Nginx binary: $NGINX_BINARY"
 [[ -x "$SSHD_BINARY" ]] || fail "missing SSH daemon: $SSHD_BINARY"
 
@@ -80,6 +84,7 @@ API_KEY="$(awk -F= '$1 == "CLIPROXY_API_KEY" {sub(/^[^=]*=/, ""); print; exit}' 
 if [[ "$DRY_RUN" -eq 1 ]]; then
   printf 'Dry run passed. Planned targets:\n'
   printf '  %s\n' "$NGINX_CONFIG_TARGET" "$SECRET_TARGET" "$SSHD_CONFIG_TARGET"
+  printf '  %s\n' "$DEVICE_TOOL_TARGET" "$DEVICE_STATE_DIR"
   exit 0
 fi
 
@@ -119,6 +124,7 @@ rollback() {
     restore_path "$NGINX_CONFIG_TARGET" nginx.conf
     restore_path "$SECRET_TARGET" gateway-secret.conf
     restore_path "$SSHD_CONFIG_TARGET" sshd.conf
+    restore_path "$DEVICE_TOOL_TARGET" device-tool
     "$NGINX_BINARY" -t >/dev/null 2>&1 || true
     "$SSHD_BINARY" -t >/dev/null 2>&1 || true
 
@@ -143,8 +149,11 @@ install -d -o root -g root -m 0700 "$BACKUP_DIR"
 backup_path "$NGINX_CONFIG_TARGET" nginx.conf
 backup_path "$SECRET_TARGET" gateway-secret.conf
 backup_path "$SSHD_CONFIG_TARGET" sshd.conf
+backup_path "$DEVICE_TOOL_TARGET" device-tool
 
 "$RESTRICTED_USER_INSTALLER"
+install -d -o root -g root -m 0700 "$DEVICE_STATE_DIR"
+install -o root -g root -m 0750 "$DEVICE_TOOL_SOURCE" "$DEVICE_TOOL_TARGET"
 
 install -d -o root -g root -m 0700 "$SECRET_DIR"
 install -o root -g root -m 0644 "$NGINX_CONFIG_SOURCE" "$NGINX_CONFIG_TARGET"
