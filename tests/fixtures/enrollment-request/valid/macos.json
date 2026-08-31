@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "device_id": "mac-mini-office",
+  "platform": "macos",
+  "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG5vbi1zZWNyZXQtdGVzdC1rZXktbWF0ZXJpYWw mac-mini-office",
+  "requested_at": "2026-08-31T05:30:00Z"
+}

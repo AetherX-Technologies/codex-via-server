@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AetherX-Technologies/codex-via-server/schemas/compatibility.schema.json",
+  "title": "Codex via Server compatibility manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project_version",
+    "connection_profile_schema_versions",
+    "codex",
+    "cliproxyapi",
+    "contract",
+    "checked_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "project_version": {
+      "$ref": "#/$defs/semantic_version"
+    },
+    "connection_profile_schema_versions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "codex": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidates", "minimum_supported", "last_tested"],
+      "properties": {
+        "candidates": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/$defs/semantic_version"
+          }
+        },
+        "minimum_supported": {
+          "oneOf": [
+            {"type": "null"},
+            {"$ref": "#/$defs/semantic_version"}
+          ]
+        },
+        "last_tested": {
+          "$ref": "#/$defs/semantic_version"
+        }
+      }
+    },
+    "cliproxyapi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum_supported", "last_tested"],
+      "properties": {
+        "minimum_supported": {
+          "$ref": "#/$defs/semantic_version"
+        },
+        "last_tested": {
+          "$ref": "#/$defs/semantic_version"
+        }
+      }
+    },
+    "contract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wire_api", "models_path", "responses_path", "streaming", "websockets"],
+      "properties": {
+        "wire_api": {
+          "type": "string",
+          "const": "responses"
+        },
+        "models_path": {
+          "type": "string",
+          "const": "/v1/models"
+        },
+        "responses_path": {
+          "type": "string",
+          "const": "/v1/responses"
+        },
+        "streaming": {
+          "type": "string",
+          "const": "sse"
+        },
+        "websockets": {
+          "type": "boolean",
+          "const": false
+        }
+      }
+    },
+    "checked_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  },
+  "$defs": {
+    "semantic_version": {
+      "type": "string",
+      "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"
+    }
+  }
+}

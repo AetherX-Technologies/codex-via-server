@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/AetherX-Technologies/codex-via-server/schemas/enrollment-request.schema.json",
+  "title": "Codex via Server enrollment request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "device_id",
+    "platform",
+    "public_key",
+    "requested_at"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "device_id": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 64,
+      "pattern": "^[a-z0-9][a-z0-9._-]{1,62}[a-z0-9]$"
+    },
+    "platform": {
+      "type": "string",
+      "enum": ["macos", "windows"]
+    },
+    "public_key": {
+      "type": "string",
+      "minLength": 48,
+      "maxLength": 512,
+      "pattern": "^ssh-ed25519 [A-Za-z0-9+/]{32,}={0,3}( [A-Za-z0-9][A-Za-z0-9._@+-]{0,127})?$"
+    },
+    "requested_at": {
+      "type": "string",
+      "format": "date-time"
+    }
+  }
+}

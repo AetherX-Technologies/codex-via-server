@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "device_id": "unsafe-command",
+  "platform": "windows",
+  "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG5vbi1zZWNyZXQtdGVzdC1rZXktbWF0ZXJpYWw unsafe-command",
+  "requested_at": "2026-08-31T05:33:00Z",
+  "command": "not-allowed"
+}

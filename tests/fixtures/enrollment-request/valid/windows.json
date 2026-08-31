@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "device_id": "windows-laptop-01",
+  "platform": "windows",
+  "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGFub3RoZXItbm9uLXNlY3JldC10ZXN0LWtleQ windows-laptop-01",
+  "requested_at": "2026-08-31T05:31:00Z"
+}

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "device_id": "unsafe-device",
+  "platform": "macos",
+  "public_key": "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIG5vbi1zZWNyZXQtdGVzdC1rZXktbWF0ZXJpYWw unsafe-device",
+  "requested_at": "2026-08-31T05:32:00Z",
+  "api_key": "forbidden-placeholder"
+}

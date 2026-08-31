@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "project_version": "0.2.0",
+  "connection_profile_schema_versions": [1],
+  "codex": {
+    "candidates": ["0.149.1", "0.150.0", "0.151.0-alpha.7.2"],
+    "minimum_supported": null,
+    "last_tested": "0.151.0-alpha.7.2"
+  },
+  "cliproxyapi": {
+    "minimum_supported": "7.2.146",
+    "last_tested": "7.2.146"
+  },
+  "contract": {
+    "wire_api": "responses",
+    "models_path": "/v1/models",
+    "responses_path": "/v1/responses",
+    "streaming": "sse",
+    "websockets": false
+  },
+  "checked_at": "2026-08-31T05:45:00Z"
+}

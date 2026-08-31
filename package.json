@@ -1,0 +1,13 @@
+{
+  "name": "codex-via-server-contract-tests",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test:schemas": "node tests/validate-schemas.mjs"
+  },
+  "devDependencies": {
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1"
+  }
+}

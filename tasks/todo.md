@@ -2,7 +2,7 @@
 
 ## Phase 1: Contracts
 
-- [ ] Task 1: Define versioned enrollment schemas
+- [x] Task 1: Define versioned enrollment schemas
 - [ ] Task 2: Add the initial compatibility manifest
 - [ ] Task 3: Extend CI for macOS and Windows
 - [ ] Checkpoint A: Contracts reviewed and CI green
