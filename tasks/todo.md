@@ -4,8 +4,8 @@
 
 - [x] Task 1: Define versioned enrollment schemas
 - [x] Task 2: Add the initial compatibility manifest
-- [ ] Task 3: Extend CI for macOS and Windows
-- [ ] Checkpoint A: Contracts reviewed and CI green
+- [x] Task 3: Extend CI for macOS and Windows
+- [x] Checkpoint A: Contracts reviewed and CI green
 
 ## Phase 2: Disposable server
 
