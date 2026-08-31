@@ -18,7 +18,17 @@ switch ($Command) {
         if ($RemainingArguments.Count -ne 1) { throw "enroll requires one profile path" }
         Import-CvsConnectionProfile -Path $RemainingArguments[0]
     }
+    "doctor" {
+        $live = $RemainingArguments -contains "--live"
+        $yes = $RemainingArguments -contains "--yes"
+        $modelIndex = [Array]::IndexOf($RemainingArguments, "--model")
+        $model = if ($modelIndex -ge 0) { $RemainingArguments[$modelIndex + 1] } else { $null }
+        Test-CvsDoctor -Live:$live -Yes:$yes -Model $model
+    }
     default {
-        throw "Command not implemented in this development slice: $Command"
+        $arguments = @()
+        if ($Command) { $arguments += $Command }
+        if ($RemainingArguments) { $arguments += $RemainingArguments }
+        exit (Invoke-CvsCodex -Arguments $arguments)
     }
 }

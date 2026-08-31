@@ -39,6 +39,22 @@ function Get-CvsStateDirectory {
     return Join-Path (Get-CvsRoot) "state"
 }
 
+function Get-CvsConnectionProfile {
+    $path = if ($env:CODEX_VIA_SERVER_CONNECTION_PROFILE) { $env:CODEX_VIA_SERVER_CONNECTION_PROFILE } else { Join-Path (Get-CvsConfigDirectory) "connection-profile.json" }
+    $item = Get-Item -LiteralPath $path -Force
+    if ($item.LinkType -or $item.PSIsContainer) { throw "Connection profile is unsafe" }
+    $profile = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json
+    Assert-CvsConnectionProfile $profile
+    return $profile
+}
+
+function Get-CvsExecutable {
+    param([Parameter(Mandatory)][string]$EnvironmentName, [Parameter(Mandatory)][string]$DefaultName)
+    $configured = [Environment]::GetEnvironmentVariable($EnvironmentName)
+    if ($configured) { return $configured }
+    return (Get-Command $DefaultName -ErrorAction Stop).Source
+}
+
 function Set-CvsPrivateAcl {
     param([Parameter(Mandatory)][string]$Path)
     if (-not $IsWindows) { return }
@@ -169,4 +185,136 @@ stream_idle_timeout_ms = 300000
     return $connectionTarget
 }
 
-Export-ModuleMember -Function Initialize-CvsDevice, Import-CvsConnectionProfile, Test-CvsVersionAtLeast
+function Get-CvsVerifiedKnownHosts {
+    param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][string]$RuntimeDirectory)
+    $keyscan = Get-CvsExecutable "CODEX_VIA_SERVER_SSH_KEYSCAN" "ssh-keyscan.exe"
+    $keygen = Get-CvsExecutable "CODEX_VIA_SERVER_SSH_KEYGEN" "ssh-keygen.exe"
+    $scanned = Join-Path $RuntimeDirectory "known_hosts.scanned"
+    $verified = Join-Path $RuntimeDirectory "known_hosts"
+    & $keyscan -T 5 -p ([string]$Profile.server.ssh_port) ([string]$Profile.server.host) 2>$null | Set-Content -LiteralPath $scanned -Encoding utf8NoBOM
+    if ($LASTEXITCODE -ne 0) { throw "Cannot read server SSH host keys" }
+    foreach ($line in Get-Content -LiteralPath $scanned) {
+        if (-not $line -or $line.StartsWith("#")) { continue }
+        $candidate = Join-Path $RuntimeDirectory "candidate-key"
+        Set-Content -LiteralPath $candidate -Value $line -Encoding utf8NoBOM
+        $fingerprintOutput = & $keygen -lf $candidate -E sha256 2>$null
+        if ($LASTEXITCODE -ne 0) { continue }
+        $fingerprint = ($fingerprintOutput -split '\s+')[1]
+        if ($Profile.server.host_fingerprints -contains $fingerprint) { Add-Content -LiteralPath $verified -Value $line -Encoding utf8NoBOM }
+    }
+    if (-not (Test-Path $verified)) { throw "Server SSH fingerprint changed" }
+    return $verified
+}
+
+function Test-CvsTailscaleReachability {
+    param([Parameter(Mandatory)][string]$HostName)
+    $tailscale = Get-CvsExecutable "CODEX_VIA_SERVER_TAILSCALE" "tailscale.exe"
+    & $tailscale ping --timeout=5s $HostName *> $null
+    if ($LASTEXITCODE -ne 0) { throw "Tailscale cannot reach the server" }
+}
+
+function Test-CvsLocalPortAvailable {
+    param([Parameter(Mandatory)][int]$Port)
+    $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $Port)
+    try { $listener.Start() } catch { throw "Local port $Port is already in use" } finally { $listener.Stop() }
+}
+
+function Start-CvsTunnel {
+    [CmdletBinding()]
+    param()
+    $profile = Get-CvsConnectionProfile
+    Test-CvsTailscaleReachability ([string]$profile.server.host)
+    Test-CvsLocalPortAvailable ([int]$profile.client.local_port)
+    $deviceId = [string]$profile.approved_device.device_id
+    $identity = Join-Path (Get-CvsKeyDirectory) $deviceId
+    if (-not (Test-Path $identity) -or (Get-Item $identity -Force).LinkType) { throw "Device SSH identity is missing or unsafe" }
+    $runtime = Join-Path ([System.IO.Path]::GetTempPath()) "codex-via-server-$([guid]::NewGuid().ToString('N'))"
+    New-Item -ItemType Directory -Path $runtime | Out-Null
+    $process = $null
+    try {
+        $knownHosts = Get-CvsVerifiedKnownHosts -Profile $profile -RuntimeDirectory $runtime
+        $ssh = Get-CvsExecutable "CODEX_VIA_SERVER_SSH" "ssh.exe"
+        $arguments = @(
+            "-F", "NUL", "-p", [string]$profile.server.ssh_port,
+            "-i", $identity, "-N",
+            "-L", "127.0.0.1:$($profile.client.local_port):127.0.0.1:$($profile.gateway.remote_port)",
+            "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "PasswordAuthentication=no",
+            "-o", "KbdInteractiveAuthentication=no", "-o", "StrictHostKeyChecking=yes",
+            "-o", "UserKnownHostsFile=$knownHosts", "-o", "GlobalKnownHostsFile=NUL",
+            "-o", "UpdateHostKeys=no", "-o", "ProxyCommand=none", "-o", "ProxyJump=none",
+            "-o", "PermitLocalCommand=no", "-o", "ExitOnForwardFailure=yes",
+            "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "LogLevel=ERROR",
+            "$($profile.server.ssh_user)@$($profile.server.host)"
+        )
+        $process = Start-Process -FilePath $ssh -ArgumentList $arguments -PassThru -WindowStyle Hidden
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        do {
+            if ($process.HasExited) { throw "Restricted SSH tunnel exited during startup" }
+            try {
+                $models = Invoke-RestMethod -Uri "http://127.0.0.1:$($profile.client.local_port)/v1/models" -TimeoutSec 2
+                if ($models.data -isnot [array]) { throw "Gateway models response is invalid" }
+                return [pscustomobject]@{Process=$process;RuntimeDirectory=$runtime;Profile=$profile}
+            } catch { Start-Sleep -Milliseconds 200 }
+        } while ([DateTime]::UtcNow -lt $deadline)
+        throw "Gateway models check timed out"
+    } catch {
+        if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
+        Remove-Item -LiteralPath $runtime -Recurse -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
+function Test-CvsCodexConfiguration {
+    param([Parameter(Mandatory)]$Profile)
+    $codex = Get-CvsExecutable "CODEX_VIA_SERVER_CODEX" "codex.exe"
+    $versionOutput = & $codex --version
+    if ($LASTEXITCODE -ne 0) { throw "Codex version check failed" }
+    $version = [regex]::Match(($versionOutput | Out-String), '[0-9]+\.[0-9]+\.[0-9]+(?:[-.][0-9A-Za-z.]+)?').Value
+    if (-not (Test-CvsVersionAtLeast $version ([string]$Profile.client.minimum_codex_version))) { throw "Codex is too old" }
+    & $codex --profile ([string]$Profile.client.codex_profile) --version *> $null
+    if ($LASTEXITCODE -ne 0) { throw "Codex profile parsing failed" }
+    return $version
+}
+
+function Invoke-CvsOfficialCodex {
+    param([Parameter(Mandatory)][string]$ProfileName, [string[]]$Arguments)
+    $codex = Get-CvsExecutable "CODEX_VIA_SERVER_CODEX" "codex.exe"
+    & $codex --profile $ProfileName @Arguments
+    return $LASTEXITCODE
+}
+
+function Stop-CvsTunnel {
+    param([Parameter(Mandatory)]$Tunnel)
+    if ($Tunnel.Process -and -not $Tunnel.Process.HasExited) { Stop-Process -Id $Tunnel.Process.Id -Force }
+    if ($Tunnel.RuntimeDirectory -and (Test-Path $Tunnel.RuntimeDirectory)) { Remove-Item -LiteralPath $Tunnel.RuntimeDirectory -Recurse -Force }
+}
+
+function Test-CvsDoctor {
+    [CmdletBinding()]
+    param([switch]$Live, [switch]$Yes, [string]$Model)
+    if ($Live -and -not $Yes) { throw "Live doctor requires -Yes" }
+    if ($Live -and $Model -cnotmatch '^[A-Za-z0-9._:/-]{1,128}$') { throw "Live doctor requires a valid model" }
+    $profile = Get-CvsConnectionProfile
+    $version = Test-CvsCodexConfiguration $profile
+    $tunnel = Start-CvsTunnel
+    try {
+        if ($Live) {
+            $body = @{model=$Model;input="Reply only OK.";stream=$true} | ConvertTo-Json -Compress
+            $response = Invoke-WebRequest -Uri "http://127.0.0.1:$($profile.client.local_port)/v1/responses" -Method Post -ContentType "application/json" -Body $body -TimeoutSec 45
+            if ($response.Content -notmatch '"type"\s*:\s*"response.completed"') { throw "Live response did not complete" }
+        }
+        return [pscustomobject]@{Status="pass";Codex=$version;Profile=$profile.client.codex_profile;Live=[bool]$Live}
+    } finally { Stop-CvsTunnel $tunnel }
+}
+
+function Invoke-CvsCodex {
+    [CmdletBinding()]
+    param([string[]]$Arguments)
+    $tunnel = Start-CvsTunnel
+    try {
+        Remove-Item Env:SERVER_CODEX_API_KEY, Env:CLIPROXY_API_KEY, Env:OPENAI_API_KEY -ErrorAction SilentlyContinue
+        return Invoke-CvsOfficialCodex -ProfileName ([string]$tunnel.Profile.client.codex_profile) -Arguments $Arguments
+    } finally { Stop-CvsTunnel $tunnel }
+}
+
+Export-ModuleMember -Function Initialize-CvsDevice, Import-CvsConnectionProfile, Test-CvsVersionAtLeast, Start-CvsTunnel, Stop-CvsTunnel, Test-CvsDoctor, Invoke-CvsCodex
