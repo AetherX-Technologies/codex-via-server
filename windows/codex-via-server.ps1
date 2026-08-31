@@ -25,6 +25,12 @@ switch ($Command) {
         $model = if ($modelIndex -ge 0) { $RemainingArguments[$modelIndex + 1] } else { $null }
         Test-CvsDoctor -Live:$live -Yes:$yes -Model $model
     }
+    "update" {
+        Update-CvsClient -CheckOnly:($RemainingArguments -contains "--check-only") -Force:($RemainingArguments -contains "--force")
+    }
+    "uninstall" {
+        Uninstall-CvsClient -RemoveDeviceKey:($RemainingArguments -contains "--remove-device-key") -Yes:($RemainingArguments -contains "--yes")
+    }
     default {
         $arguments = @()
         if ($Command) { $arguments += $Command }

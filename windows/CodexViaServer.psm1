@@ -2,6 +2,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $script:ClientVersion = "0.2.0-dev.1"
+$script:ModuleRoot = $PSScriptRoot
 
 function Invoke-CvsSshKeygen {
     param([Parameter(Mandatory)][AllowEmptyString()][string[]]$Arguments)
@@ -317,4 +318,104 @@ function Invoke-CvsCodex {
     } finally { Stop-CvsTunnel $tunnel }
 }
 
-Export-ModuleMember -Function Initialize-CvsDevice, Import-CvsConnectionProfile, Test-CvsVersionAtLeast, Start-CvsTunnel, Stop-CvsTunnel, Test-CvsDoctor, Invoke-CvsCodex
+function Get-CvsInstallRoot {
+    if ($env:CODEX_VIA_SERVER_INSTALL_ROOT) { return $env:CODEX_VIA_SERVER_INSTALL_ROOT }
+    return $script:ModuleRoot
+}
+
+function Get-CvsLatestRelease {
+    $stateDirectory = Get-CvsStateDirectory
+    $cachePath = Join-Path $stateDirectory "update-check.json"
+    New-Item -ItemType Directory -Force -Path $stateDirectory | Out-Null
+    $now = [DateTimeOffset]::UtcNow.ToUnixTimeSeconds()
+    if (-not $env:CODEX_VIA_SERVER_FORCE_UPDATE_CHECK -and (Test-Path $cachePath)) {
+        $cached = Get-Content $cachePath -Raw | ConvertFrom-Json
+        if (($now - [long]$cached.checked_at) -lt 86400) { return $cached }
+    }
+    $uri = if ($env:CODEX_VIA_SERVER_RELEASE_API) { $env:CODEX_VIA_SERVER_RELEASE_API } else { "https://api.github.com/repos/AetherX-Technologies/codex-via-server/releases/latest" }
+    $response = Invoke-RestMethod -Uri $uri -Headers @{Accept="application/vnd.github+json"}
+    $asset = @($response.assets | Where-Object name -eq "codex-via-server-windows.zip")[0]
+    $checksums = @($response.assets | Where-Object name -eq "checksums.txt")[0]
+    if (-not $asset -or -not $checksums) { throw "Release artifacts are missing" }
+    $result = [ordered]@{checked_at=$now;tag_name=$response.tag_name;asset_url=$asset.browser_download_url;checksums_url=$checksums.browser_download_url}
+    $result | ConvertTo-Json | Set-Content $cachePath -Encoding utf8NoBOM
+    Set-CvsPrivateAcl $cachePath
+    return [pscustomobject]$result
+}
+
+function Update-CvsClient {
+    [CmdletBinding()]
+    param([switch]$CheckOnly, [switch]$Force)
+    if ($Force) { $env:CODEX_VIA_SERVER_FORCE_UPDATE_CHECK="1" }
+    try { $release = Get-CvsLatestRelease } finally { Remove-Item Env:CODEX_VIA_SERVER_FORCE_UPDATE_CHECK -ErrorAction SilentlyContinue }
+    $latest = ([string]$release.tag_name).TrimStart('v')
+    if ($latest -cnotmatch '^\d+\.\d+\.\d+$') { throw "Invalid release version" }
+    $installRoot = Get-CvsInstallRoot
+    $versionPath = Join-Path $installRoot "VERSION"
+    $installed = if (Test-Path $versionPath) { (Get-Content $versionPath -Raw).Trim() } else { "0.0.0" }
+    if ($CheckOnly) { return [pscustomobject]@{Installed=$installed;Latest=$latest} }
+    if (Test-CvsVersionAtLeast $installed $latest) { return [pscustomobject]@{Status="current";Version=$installed} }
+
+    $stateDirectory = Get-CvsStateDirectory
+    $runtime = Join-Path ([System.IO.Path]::GetTempPath()) "codex-update-$([guid]::NewGuid().ToString('N'))"
+    $backup = Join-Path $stateDirectory "backups/$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'))-$PID"
+    New-Item -ItemType Directory -Force -Path $runtime,$backup | Out-Null
+    $archive = Join-Path $runtime "codex-via-server-windows.zip"
+    $checksums = Join-Path $runtime "checksums.txt"
+    $committed = $false
+    try {
+        Invoke-WebRequest -Uri $release.asset_url -OutFile $archive
+        Invoke-WebRequest -Uri $release.checksums_url -OutFile $checksums
+        $expected = ((Get-Content $checksums | Where-Object {$_ -match 'codex-via-server-windows\.zip$'} | Select-Object -First 1) -split '\s+')[0]
+        if ($expected -cnotmatch '^[a-f0-9]{64}$') { throw "Release checksum is missing" }
+        if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expected) { throw "Release checksum mismatch" }
+        Expand-Archive -LiteralPath $archive -DestinationPath $runtime
+        $packageRoot = Join-Path $runtime "codex-via-server-windows"
+        foreach ($file in @("codex-via-server.ps1","CodexViaServer.psm1","VERSION")) {
+            $candidate = Join-Path $packageRoot $file
+            if (-not (Test-Path $candidate) -or (Get-Item $candidate -Force).LinkType) { throw "Candidate file is missing or unsafe: $file" }
+        }
+        if ((Get-Content (Join-Path $packageRoot "VERSION") -Raw).Trim() -cne $latest) { throw "Package version mismatch" }
+        foreach ($scriptFile in @("codex-via-server.ps1","CodexViaServer.psm1")) {
+            $tokens=$null;$errors=$null
+            [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $packageRoot $scriptFile),[ref]$tokens,[ref]$errors)|Out-Null
+            if ($errors.Count -gt 0) { throw "Candidate PowerShell parse failed" }
+        }
+        if (Test-Path $installRoot) { Copy-Item $installRoot (Join-Path $backup "install") -Recurse -Force } else { New-Item -ItemType File (Join-Path $backup "install.absent") | Out-Null }
+        New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
+        Copy-Item (Join-Path $packageRoot "*") $installRoot -Recurse -Force
+        if ($env:CODEX_VIA_SERVER_TEST_FAIL_STAGE -eq "after-copy") { throw "Injected update failure" }
+        $committed=$true
+        return [pscustomobject]@{Status="updated";Version=$latest;Backup=$backup}
+    } finally {
+        if (-not $committed) {
+            if (Test-Path (Join-Path $backup "install")) {
+                if (Test-Path $installRoot) { Remove-Item $installRoot -Recurse -Force }
+                Copy-Item (Join-Path $backup "install") $installRoot -Recurse -Force
+            } elseif (Test-Path (Join-Path $backup "install.absent")) {
+                Remove-Item $installRoot -Recurse -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Remove-Item $runtime -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Uninstall-CvsClient {
+    [CmdletBinding()]
+    param([switch]$RemoveDeviceKey, [switch]$Yes)
+    if ($RemoveDeviceKey -and -not $Yes) { throw "Removing the device key requires -Yes" }
+    $root = Get-CvsRoot
+    $config = Join-Path (Get-CvsConfigDirectory) "connection-profile.json"
+    $deviceId=$null;$profileName="codex-via-server"
+    if (Test-Path $config) { $profile=Get-Content $config -Raw|ConvertFrom-Json;$deviceId=$profile.approved_device.device_id;$profileName=$profile.client.codex_profile }
+    if ($profileName -cnotmatch '^[A-Za-z0-9_-]{3,64}$') { throw "Unsafe profile name" }
+    $codexHome=if($env:CODEX_HOME){$env:CODEX_HOME}else{Join-Path $root ".codex"}
+    $targets=@((Get-CvsInstallRoot),$config,(Join-Path $codexHome "$profileName.config.toml"))
+    $backup=Join-Path (Get-CvsStateDirectory) "uninstall-backups/$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'))-$PID"
+    New-Item -ItemType Directory -Force -Path $backup|Out-Null
+    foreach($target in $targets){if(Test-Path $target){$item=Get-Item $target -Force;if($item.LinkType){throw "Refusing symbolic link"};Copy-Item $target (Join-Path $backup ([guid]::NewGuid().ToString('N'))) -Recurse -Force;Remove-Item $target -Recurse -Force}}
+    if($RemoveDeviceKey -and $deviceId){foreach($key in @((Join-Path (Get-CvsKeyDirectory) $deviceId),(Join-Path (Get-CvsKeyDirectory) "$deviceId.pub"))){if(Test-Path $key){Remove-Item $key -Force}}}
+    return [pscustomobject]@{Status="uninstalled";Backup=$backup;DeviceKeyRemoved=[bool]$RemoveDeviceKey}
+}
+
+Export-ModuleMember -Function Initialize-CvsDevice, Import-CvsConnectionProfile, Test-CvsVersionAtLeast, Start-CvsTunnel, Stop-CvsTunnel, Test-CvsDoctor, Invoke-CvsCodex, Update-CvsClient, Uninstall-CvsClient
