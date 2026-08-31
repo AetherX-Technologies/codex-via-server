@@ -60,15 +60,18 @@ LAUNCHER="${FAKE_HOME}/.local/bin/codex-via-server"
 CONFIG="${FAKE_HOME}/.config/codex-via-server/config"
 PROFILE="${FAKE_HOME}/.codex/codex-via-server.config.toml"
 COMMANDS="${FAKE_HOME}/.local/lib/codex-via-server/commands.sh"
+SETUP="${FAKE_HOME}/.local/lib/codex-via-server/setup.sh"
 
 [[ -x "$LAUNCHER" ]] || fail "launcher was not installed"
 [[ -f "$CONFIG" ]] || fail "client config was not installed"
 [[ -f "$PROFILE" ]] || fail "Codex profile was not installed"
 [[ -f "$COMMANDS" ]] || fail "command dispatcher was not installed"
+[[ -f "$SETUP" ]] || fail "setup command was not installed"
 [[ "$(file_mode "$LAUNCHER")" == "755" ]] || fail "launcher mode is not 755"
 [[ "$(file_mode "$CONFIG")" == "600" ]] || fail "config mode is not 600"
 [[ "$(file_mode "$PROFILE")" == "600" ]] || fail "profile mode is not 600"
 [[ "$(file_mode "$COMMANDS")" == "644" ]] || fail "command dispatcher mode is not 644"
+[[ "$(file_mode "$SETUP")" == "644" ]] || fail "setup command mode is not 644"
 
 help_output="$(HOME="$FAKE_HOME" bash "$LAUNCHER" help)"
 printf '%s\n' "$help_output" | grep -q 'codex-via-server setup'

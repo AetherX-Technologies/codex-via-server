@@ -16,6 +16,10 @@ Arguments that do not match a command are passed unchanged to official Codex.
 EOF
 }
 
+codex_via_server_library_dir() {
+  cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+}
+
 is_codex_via_server_command() {
   case "$1" in
     setup|enroll|doctor|update|uninstall|help) return 0 ;;
@@ -32,7 +36,11 @@ run_codex_via_server_command() {
       [[ $# -eq 0 ]] || return 2
       codex_via_server_usage
       ;;
-    setup|enroll|doctor|update|uninstall)
+    setup)
+      source "$(codex_via_server_library_dir)/setup.sh"
+      codex_via_server_setup "$@"
+      ;;
+    enroll|doctor|update|uninstall)
       printf 'codex-via-server: %s is not available in this development build yet\n' \
         "$command_name" >&2
       return 69
