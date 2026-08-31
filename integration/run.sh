@@ -14,6 +14,14 @@ PROFILE_FILE="${RUNTIME_DIR}/connection-profile.json"
 KNOWN_HOSTS="${RUNTIME_DIR}/known_hosts"
 LOCAL_PORT="18317"
 
+report_error() {
+  status=$?
+  line_number="$1"
+  printf '::error file=integration/run.sh,line=%s::integration failed with status %s\n' \
+    "$line_number" "$status" >&2
+  exit "$status"
+}
+
 cleanup() {
   trap - EXIT HUP INT TERM
   docker stop "$CONTAINER_NAME" >/dev/null 2>&1 || true
@@ -23,6 +31,7 @@ cleanup() {
 }
 
 trap cleanup EXIT
+trap 'report_error "$LINENO"' ERR
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
