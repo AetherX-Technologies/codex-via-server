@@ -48,3 +48,13 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./windows/tests/Test-RepositoryContracts.ps1
+
+      - name: Install pinned Pester
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Install-Module Pester -RequiredVersion 5.7.1 -Scope CurrentUser -Force -SkipPublisherCheck
+
+      - name: Run Windows setup and enrollment tests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Invoke-Pester ./windows/tests/Setup.Tests.ps1 -CI
