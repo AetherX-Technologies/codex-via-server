@@ -107,12 +107,3 @@ EOF
   printf 'Connection profile installed: %s\n' "$connection_profile_target"
   printf 'Codex profile installed: %s\n' "$codex_profile_target"
 }
-
-codex_via_server_version_at_least() {
-  current_version="$1"
-  minimum_version="$2"
-  current_core="${current_version%%-*}"
-  minimum_core="${minimum_version%%-*}"
-  oldest_version="$(printf '%s\n%s\n' "$current_core" "$minimum_core" | sort -V | head -n 1)"
-  [[ "$oldest_version" == "$minimum_core" ]]
-}

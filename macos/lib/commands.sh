@@ -20,6 +20,15 @@ codex_via_server_library_dir() {
   cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
 }
 
+codex_via_server_version_at_least() {
+  current_version="$1"
+  minimum_version="$2"
+  current_core="${current_version%%-*}"
+  minimum_core="${minimum_version%%-*}"
+  oldest_version="$(printf '%s\n%s\n' "$current_core" "$minimum_core" | sort -V | head -n 1)"
+  [[ "$oldest_version" == "$minimum_core" ]]
+}
+
 is_codex_via_server_command() {
   case "$1" in
     setup|enroll|doctor|update|uninstall|help) return 0 ;;
@@ -44,7 +53,12 @@ run_codex_via_server_command() {
       source "$(codex_via_server_library_dir)/enroll.sh"
       codex_via_server_enroll "$@"
       ;;
-    doctor|update|uninstall)
+    doctor)
+      source "$(codex_via_server_library_dir)/tunnel.sh"
+      source "$(codex_via_server_library_dir)/doctor.sh"
+      codex_via_server_doctor "$@"
+      ;;
+    update|uninstall)
       printf 'codex-via-server: %s is not available in this development build yet\n' \
         "$command_name" >&2
       return 69

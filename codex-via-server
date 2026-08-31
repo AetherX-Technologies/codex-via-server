@@ -5,7 +5,9 @@ umask 077
 
 PROGRAM_NAME="codex-via-server"
 CONFIG_FILE="${CODEX_VIA_SERVER_CONFIG:-${HOME}/.config/codex-via-server/config}"
+CONNECTION_PROFILE_FILE="${CODEX_VIA_SERVER_CONNECTION_PROFILE:-${HOME}/.config/codex-via-server/connection-profile.json}"
 COMMANDS_FILE="${CODEX_VIA_SERVER_COMMANDS_FILE:-${HOME}/.local/lib/codex-via-server/commands.sh}"
+TUNNEL_FILE="${CODEX_VIA_SERVER_TUNNEL_FILE:-${HOME}/.local/lib/codex-via-server/tunnel.sh}"
 RUNTIME_DIR=""
 CONTROL_SOCKET=""
 SSH_MASTER_STARTED=0
@@ -49,6 +51,13 @@ if [[ -r "$COMMANDS_FILE" ]]; then
     run_codex_via_server_command "$@"
     exit $?
   fi
+fi
+
+if [[ -r "$CONNECTION_PROFILE_FILE" ]]; then
+  [[ -r "$TUNNEL_FILE" ]] || fail "v0.2 tunnel library is missing: $TUNNEL_FILE"
+  source "$TUNNEL_FILE"
+  codex_via_server_run_v2 "$@"
+  exit $?
 fi
 
 [[ -r "$CONFIG_FILE" ]] || fail "configuration is missing: $CONFIG_FILE"
