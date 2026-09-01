@@ -59,7 +59,8 @@ Describe "Windows setup and enrollment" {
         (Get-FileHash $defaultConfig).Hash | Should -Be $before
         $generated = Get-Content (Join-Path $codexHome "codex-via-server.config.toml") -Raw
         $generated | Should -Match 'wire_api = "responses"'
-        $generated | Should -Not -Match 'env_key|requires_openai_auth|model_catalog_json'
+        $generated | Should -Match 'requires_openai_auth = false'
+        $generated | Should -Not -Match 'env_key|model_catalog_json'
         Remove-Item Env:CODEX_HOME
     }
 
@@ -85,6 +86,8 @@ Describe "Windows setup and enrollment" {
         & (Join-Path $script:RepositoryRoot "windows/install.ps1") -InstallRoot $installRoot | Out-Null
         Test-Path (Join-Path $installRoot "codex-via-server.ps1") | Should -BeTrue
         Test-Path (Join-Path $installRoot "CodexViaServer.psm1") | Should -BeTrue
+        Test-Path (Join-Path $installRoot "persistent-tunnel.ps1") | Should -BeTrue
+        Test-Path (Join-Path $installRoot "stop-persistent-tunnel.ps1") | Should -BeTrue
         Test-Path (Join-Path $installRoot "VERSION") | Should -BeTrue
     }
 }

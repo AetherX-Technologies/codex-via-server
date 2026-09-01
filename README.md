@@ -4,7 +4,7 @@
 
 [![CI](https://github.com/AetherX-Technologies/codex-via-server/actions/workflows/test.yml/badge.svg)](https://github.com/AetherX-Technologies/codex-via-server/actions/workflows/test.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![Platform: macOS](https://img.shields.io/badge/platform-macOS-lightgrey.svg)](#requirements)
+[![Platform: macOS and Windows](https://img.shields.io/badge/platform-macOS%20%7C%20Windows-lightgrey.svg)](#requirements)
 
 Run the official Codex CLI on your Mac while routing its Responses API traffic
 through a private [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
@@ -63,8 +63,14 @@ Codex user interface.
 | Tailscale IPv4 (`100.64.0.0/10`) | Required |
 | SSH key authentication | Required |
 | CLIProxyAPI Responses API | Required |
-| Windows | Not yet implemented or claimed |
+| Windows PowerShell 7 CLI | Supported on the v0.2 feature branch |
+| Windows Codex desktop persistent tunnel | Supported through a current-user Scheduled Task |
 | Linux client | Not yet tested |
+
+Windows setup, desktop autostart, recovery, and rollback are documented in
+[Windows Codex desktop persistent tunnel](docs/WINDOWS-DESKTOP.md). The Windows
+client uses approved per-device keys and the v0.2 server-side loopback gateway;
+it never stores a real provider API key.
 
 ## Requirements
 

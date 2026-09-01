@@ -13,6 +13,7 @@ Describe "Windows doctor and launcher" {
             Mock Get-CvsConnectionProfile { $script:FakeProfile }
             Mock Test-CvsVersionAtLeast { $true }
             Mock Test-CvsCodexConfiguration { "0.151.0" }
+            Mock Get-CvsManagedTunnelProcess { $null }
         }
 
         It "requires explicit live confirmation" {
@@ -59,7 +60,7 @@ Describe "Windows doctor and launcher" {
                 $script:arguments = $ArgumentList
                 [pscustomobject]@{HasExited=$false;Id=4321}
             }
-            Mock Invoke-RestMethod { [pscustomobject]@{data=@()} }
+            Mock Test-CvsGatewayModels { $true }
             $tunnel = Start-CvsTunnel
             $joined = $script:arguments -join " "
             $joined | Should -Match '127\.0\.0\.1:18317:127\.0\.0\.1:18319'
@@ -70,6 +71,29 @@ Describe "Windows doctor and launcher" {
             $joined | Should -Match 'ProxyJump=none'
             $joined | Should -Not -Match 'api.key|Authorization|CLIPROXY'
             $tunnel.Profile.server.ssh_user | Should -Be 'codex-tunnel'
+        }
+
+        It "reuses only a verified managed SSH listener" {
+            $managed = [pscustomobject]@{HasExited=$false;Id=2468}
+            Mock Get-CvsManagedTunnelProcess { $managed }
+            Mock Test-CvsGatewayModels { $true }
+            Mock Test-CvsTailscaleReachability {}
+            $tunnel = Start-CvsTunnel
+            $tunnel.Reused | Should -BeTrue
+            $tunnel.Process | Should -BeNullOrEmpty
+            $tunnel.ManagedProcess.Id | Should -Be 2468
+            Should -Invoke Test-CvsTailscaleReachability -Times 0
+        }
+
+        It "accepts DERP Tailscale reachability without waiting for a direct path" {
+            $script:TailscaleArguments = $null
+            function Invoke-FakeTailscale {
+                $script:TailscaleArguments = @($args)
+                $global:LASTEXITCODE = 0
+            }
+            Mock Get-CvsExecutable { "Invoke-FakeTailscale" }
+            Test-CvsTailscaleReachability -HostName "100.64.10.20"
+            $script:TailscaleArguments | Should -Be @("ping", "--timeout=5s", "--c=1", "--until-direct=false", "100.64.10.20")
         }
 
         It "stops the SSH process and removes runtime state" {

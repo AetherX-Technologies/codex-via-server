@@ -39,14 +39,19 @@ SSH只负责可靠转发字节。Codex仍在本机运行，读取和修改的也
 ## 当前支持范围
 
 - macOS。
+- Windows PowerShell 7 CLI（v0.2 feature 分支）。
+- Windows Codex 桌面端当前用户登录任务和常驻受限 SSH 隧道。
 - 官方 Codex CLI。
 - Tailscale IPv4地址 `100.64.0.0/10`。
 - 通过 SSH密钥登录服务器。
 - CLIProxyAPI使用 Responses API和 Bearer API Key。
 - 交互式 `codex` 与 `codex exec` 参数透传。
 
-Windows PowerShell版本尚未发布和验证，因此本项目当前不会声称支持 Windows。
 Linux客户端也尚未验证。
+
+Windows 的完整安装、设备申请、桌面端开机启动、断线恢复和回滚步骤见
+[Windows Codex 桌面端常驻隧道](docs/WINDOWS-DESKTOP.zh-CN.md)。Windows 客户端
+使用管理员批准的每设备独立密钥和 v0.2 服务器回环网关，不在本机保存真实 API Key。
 
 ## 前提条件
 

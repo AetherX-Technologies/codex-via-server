@@ -3,6 +3,12 @@ $ErrorActionPreference = "Stop"
 
 $script:ClientVersion = "0.2.0-dev.1"
 $script:ModuleRoot = $PSScriptRoot
+$script:DesktopTaskName = "CodexViaServer Persistent Tunnel"
+$script:DesktopProviderName = "codex_via_server_desktop"
+$script:DesktopRootBegin = "# BEGIN CODEX VIA SERVER DESKTOP ROOT"
+$script:DesktopRootEnd = "# END CODEX VIA SERVER DESKTOP ROOT"
+$script:DesktopProviderBegin = "# BEGIN CODEX VIA SERVER DESKTOP PROVIDER"
+$script:DesktopProviderEnd = "# END CODEX VIA SERVER DESKTOP PROVIDER"
 
 function Invoke-CvsSshKeygen {
     param([Parameter(Mandatory)][AllowEmptyString()][string[]]$Arguments)
@@ -25,6 +31,11 @@ function Test-CvsVersionAtLeast {
 function Get-CvsRoot {
     if ($env:CODEX_VIA_SERVER_HOME) { return $env:CODEX_VIA_SERVER_HOME }
     return Join-Path $HOME ".codex-via-server"
+}
+
+function Get-CvsCodexHome {
+    if ($env:CODEX_HOME) { return $env:CODEX_HOME }
+    return Join-Path $HOME ".codex"
 }
 
 function Get-CvsKeyDirectory {
@@ -166,7 +177,7 @@ function Import-CvsConnectionProfile {
     Copy-Item -LiteralPath $Path -Destination $connectionTarget -Force
     Set-CvsPrivateAcl $connectionTarget
 
-    $codexHome = if ($env:CODEX_HOME) { $env:CODEX_HOME } else { Join-Path (Get-CvsRoot) ".codex" }
+    $codexHome = Get-CvsCodexHome
     New-Item -ItemType Directory -Force -Path $codexHome | Out-Null
     $codexTarget = Join-Path $codexHome "$($profile.client.codex_profile).config.toml"
     $toml = @"
@@ -177,6 +188,7 @@ name = "CLIProxyAPI through a restricted SSH tunnel"
 base_url = "http://127.0.0.1:$($profile.client.local_port)/v1"
 wire_api = "responses"
 supports_websockets = false
+requires_openai_auth = false
 request_max_retries = 2
 stream_max_retries = 4
 stream_idle_timeout_ms = 300000
@@ -210,8 +222,128 @@ function Get-CvsVerifiedKnownHosts {
 function Test-CvsTailscaleReachability {
     param([Parameter(Mandatory)][string]$HostName)
     $tailscale = Get-CvsExecutable "CODEX_VIA_SERVER_TAILSCALE" "tailscale.exe"
-    & $tailscale ping --timeout=5s $HostName *> $null
+    & $tailscale ping --timeout=5s --c=1 --until-direct=false $HostName *> $null
     if ($LASTEXITCODE -ne 0) { throw "Tailscale cannot reach the server" }
+}
+
+function Test-CvsGatewayModels {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$Port)
+    try {
+        $models = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/models" -TimeoutSec 2
+        return ($models.data -is [array])
+    } catch {
+        return $false
+    }
+}
+
+function New-CvsSshArguments {
+    param(
+        [Parameter(Mandatory)]$Profile,
+        [Parameter(Mandatory)][string]$Identity,
+        [Parameter(Mandatory)][string]$KnownHosts
+    )
+    return @(
+        "-F", "NUL", "-p", [string]$Profile.server.ssh_port,
+        "-i", $Identity, "-N",
+        "-L", "127.0.0.1:$($Profile.client.local_port):127.0.0.1:$($Profile.gateway.remote_port)",
+        "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "PasswordAuthentication=no",
+        "-o", "KbdInteractiveAuthentication=no", "-o", "StrictHostKeyChecking=yes",
+        "-o", "UserKnownHostsFile=$KnownHosts", "-o", "GlobalKnownHostsFile=NUL",
+        "-o", "UpdateHostKeys=no", "-o", "ProxyCommand=none", "-o", "ProxyJump=none",
+        "-o", "PermitLocalCommand=no", "-o", "ExitOnForwardFailure=yes",
+        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "LogLevel=ERROR",
+        "$($Profile.server.ssh_user)@$($Profile.server.host)"
+    )
+}
+
+function ConvertTo-CvsWindowsProcessArgument {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Argument)
+    if ($Argument -notmatch '[\s"]') { return $Argument }
+    if ($Argument.Contains('"')) { throw "SSH argument contains an unsafe quote" }
+    return '"' + $Argument + '"'
+}
+
+function ConvertFrom-CvsWindowsCommandLine {
+    param([Parameter(Mandatory)][string]$CommandLine)
+    $arguments = [System.Collections.Generic.List[string]]::new()
+    $length = $CommandLine.Length
+    $index = 0
+    while ($index -lt $length) {
+        while ($index -lt $length -and [char]::IsWhiteSpace($CommandLine[$index])) { $index++ }
+        if ($index -ge $length) { break }
+        $builder = [System.Text.StringBuilder]::new()
+        $quoted = $false
+        while ($index -lt $length) {
+            $slashes = 0
+            while ($index -lt $length -and $CommandLine[$index] -eq '\') { $slashes++; $index++ }
+            if ($index -lt $length -and $CommandLine[$index] -eq '"') {
+                [void]$builder.Append(('\' * [Math]::Floor($slashes / 2)))
+                if (($slashes % 2) -eq 0) { $quoted = -not $quoted } else { [void]$builder.Append('"') }
+                $index++
+                continue
+            }
+            [void]$builder.Append(('\' * $slashes))
+            if ($index -ge $length -or (-not $quoted -and [char]::IsWhiteSpace($CommandLine[$index]))) { break }
+            [void]$builder.Append($CommandLine[$index])
+            $index++
+        }
+        $arguments.Add($builder.ToString())
+    }
+    return $arguments.ToArray()
+}
+
+function Test-CvsManagedSshCommandLine {
+    param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][string]$CommandLine)
+    $tokens = @(ConvertFrom-CvsWindowsCommandLine $CommandLine)
+    if ($tokens.Count -lt 2 -or [System.IO.Path]::GetFileName($tokens[0]) -ine "ssh.exe") { return $false }
+
+    $identity = [System.IO.Path]::GetFullPath((Join-Path (Get-CvsKeyDirectory) ([string]$Profile.approved_device.device_id)))
+    $knownHostsIndex = -1
+    $template = @(New-CvsSshArguments -Profile $Profile -Identity $identity -KnownHosts "__KNOWN_HOSTS__")
+    for ($i = 0; $i -lt $template.Count; $i++) {
+        if ($template[$i] -eq "UserKnownHostsFile=__KNOWN_HOSTS__") { $knownHostsIndex = $i; break }
+    }
+    if ($knownHostsIndex -lt 0) { return $false }
+    $actual = @($tokens[1..($tokens.Count - 1)])
+    if ($actual.Count -ne $template.Count) { return $false }
+
+    for ($i = 0; $i -lt $template.Count; $i++) {
+        if ($i -eq $knownHostsIndex) { continue }
+        if ($i -eq 5) {
+            try {
+                if ([System.IO.Path]::GetFullPath($actual[$i]) -ine $template[$i]) { return $false }
+            } catch { return $false }
+        } elseif ($actual[$i] -cne $template[$i]) {
+            return $false
+        }
+    }
+
+    $knownHostsValue = $actual[$knownHostsIndex]
+    if (-not $knownHostsValue.StartsWith("UserKnownHostsFile=", [System.StringComparison]::Ordinal)) { return $false }
+    try {
+        $knownHostsPath = [System.IO.Path]::GetFullPath($knownHostsValue.Substring("UserKnownHostsFile=".Length))
+        $temporaryRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/')
+        $runtimeDirectory = Split-Path -Parent $knownHostsPath
+        if ((Split-Path -Leaf $knownHostsPath) -cne "known_hosts") { return $false }
+        if (-not $runtimeDirectory.StartsWith((Join-Path $temporaryRoot "codex-via-server-"), [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+    } catch { return $false }
+    return $true
+}
+
+function Get-CvsManagedTunnelProcess {
+    [CmdletBinding()]
+    param($Profile = (Get-CvsConnectionProfile))
+    $listeners = @(Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort ([int]$Profile.client.local_port) -State Listen -ErrorAction SilentlyContinue)
+    foreach ($processId in @($listeners.OwningProcess | Where-Object { $_ } | Sort-Object -Unique)) {
+        $processRecord = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
+        if (-not $processRecord) { continue }
+        $executableName = if ($processRecord.ExecutablePath) { [System.IO.Path]::GetFileName([string]$processRecord.ExecutablePath) } else { [string]$processRecord.Name }
+        if ($executableName -ine "ssh.exe") { continue }
+        if (-not (Test-CvsManagedSshCommandLine -Profile $Profile -CommandLine ([string]$processRecord.CommandLine))) { continue }
+        return Get-Process -Id ([int]$processId) -ErrorAction SilentlyContinue
+    }
+    return $null
 }
 
 function Test-CvsLocalPortAvailable {
@@ -224,6 +356,11 @@ function Start-CvsTunnel {
     [CmdletBinding()]
     param()
     $profile = Get-CvsConnectionProfile
+    $managedProcess = Get-CvsManagedTunnelProcess -Profile $profile
+    if ($managedProcess) {
+        if (-not (Test-CvsGatewayModels -Port ([int]$profile.client.local_port))) { throw "Managed SSH tunnel is not healthy" }
+        return [pscustomobject]@{Process=$null;ManagedProcess=$managedProcess;RuntimeDirectory=$null;Profile=$profile;Reused=$true}
+    }
     Test-CvsTailscaleReachability ([string]$profile.server.host)
     Test-CvsLocalPortAvailable ([int]$profile.client.local_port)
     $deviceId = [string]$profile.approved_device.device_id
@@ -235,26 +372,15 @@ function Start-CvsTunnel {
     try {
         $knownHosts = Get-CvsVerifiedKnownHosts -Profile $profile -RuntimeDirectory $runtime
         $ssh = Get-CvsExecutable "CODEX_VIA_SERVER_SSH" "ssh.exe"
-        $arguments = @(
-            "-F", "NUL", "-p", [string]$profile.server.ssh_port,
-            "-i", $identity, "-N",
-            "-L", "127.0.0.1:$($profile.client.local_port):127.0.0.1:$($profile.gateway.remote_port)",
-            "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "PasswordAuthentication=no",
-            "-o", "KbdInteractiveAuthentication=no", "-o", "StrictHostKeyChecking=yes",
-            "-o", "UserKnownHostsFile=$knownHosts", "-o", "GlobalKnownHostsFile=NUL",
-            "-o", "UpdateHostKeys=no", "-o", "ProxyCommand=none", "-o", "ProxyJump=none",
-            "-o", "PermitLocalCommand=no", "-o", "ExitOnForwardFailure=yes",
-            "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "LogLevel=ERROR",
-            "$($profile.server.ssh_user)@$($profile.server.host)"
-        )
-        $process = Start-Process -FilePath $ssh -ArgumentList $arguments -PassThru -WindowStyle Hidden
+        $arguments = New-CvsSshArguments -Profile $profile -Identity $identity -KnownHosts $knownHosts
+        $processArgumentLine = (@($arguments | ForEach-Object { ConvertTo-CvsWindowsProcessArgument ([string]$_) }) -join ' ')
+        $process = Start-Process -FilePath $ssh -ArgumentList $processArgumentLine -PassThru -WindowStyle Hidden
         $deadline = [DateTime]::UtcNow.AddSeconds(10)
         do {
             if ($process.HasExited) { throw "Restricted SSH tunnel exited during startup" }
             try {
-                $models = Invoke-RestMethod -Uri "http://127.0.0.1:$($profile.client.local_port)/v1/models" -TimeoutSec 2
-                if ($models.data -isnot [array]) { throw "Gateway models response is invalid" }
-                return [pscustomobject]@{Process=$process;RuntimeDirectory=$runtime;Profile=$profile}
+                if (-not (Test-CvsGatewayModels -Port ([int]$profile.client.local_port))) { throw "Gateway models response is invalid" }
+                return [pscustomobject]@{Process=$process;RuntimeDirectory=$runtime;Profile=$profile;Reused=$false}
             } catch { Start-Sleep -Milliseconds 200 }
         } while ([DateTime]::UtcNow -lt $deadline)
         throw "Gateway models check timed out"
@@ -318,6 +444,220 @@ function Invoke-CvsCodex {
     } finally { Stop-CvsTunnel $tunnel }
 }
 
+function Get-CvsDesktopBackupPath {
+    return Join-Path (Get-CvsConfigDirectory) "desktop-config.toml.backup"
+}
+
+function Get-CvsDesktopAbsentMarkerPath {
+    return Join-Path (Get-CvsConfigDirectory) "desktop-config.toml.absent"
+}
+
+function Backup-CvsDesktopCodexConfig {
+    $codexHome = Get-CvsCodexHome
+    $configPath = Join-Path $codexHome "config.toml"
+    $backupPath = Get-CvsDesktopBackupPath
+    $absentMarker = Get-CvsDesktopAbsentMarkerPath
+    New-Item -ItemType Directory -Force -Path $codexHome,(Get-CvsConfigDirectory) | Out-Null
+    if ((Test-Path -LiteralPath $backupPath) -and (Test-Path -LiteralPath $absentMarker)) { throw "Desktop configuration backup state is inconsistent" }
+    if ((Test-Path -LiteralPath $backupPath) -or (Test-Path -LiteralPath $absentMarker)) { return }
+    if (Test-Path -LiteralPath $configPath) {
+        $item = Get-Item -LiteralPath $configPath -Force
+        if ($item.LinkType -or $item.PSIsContainer) { throw "Codex config is unsafe" }
+        Copy-Item -LiteralPath $configPath -Destination $backupPath
+        Set-CvsPrivateAcl $backupPath
+    } else {
+        New-Item -ItemType File -Path $absentMarker | Out-Null
+        Set-CvsPrivateAcl $absentMarker
+    }
+}
+
+function Remove-CvsDesktopManagedBlocks {
+    param([Parameter(Mandatory)][AllowEmptyString()][string]$Content)
+    foreach ($pair in @(
+        @($script:DesktopRootBegin, $script:DesktopRootEnd),
+        @($script:DesktopProviderBegin, $script:DesktopProviderEnd)
+    )) {
+        $pattern = '(?ms)^' + [regex]::Escape($pair[0]) + '\r?\n.*?^' + [regex]::Escape($pair[1]) + '\r?\n?'
+        $Content = [regex]::Replace($Content, $pattern, '')
+    }
+    return $Content
+}
+
+function Set-CvsDesktopCodexConfig {
+    param([Parameter(Mandatory)]$Profile)
+    $configPath = Join-Path (Get-CvsCodexHome) "config.toml"
+    if (Test-Path -LiteralPath $configPath) {
+        $item = Get-Item -LiteralPath $configPath -Force
+        if ($item.LinkType -or $item.PSIsContainer) { throw "Codex config is unsafe" }
+        $content = Get-Content -LiteralPath $configPath -Raw
+    } else {
+        $content = ""
+    }
+    $content = Remove-CvsDesktopManagedBlocks -Content $content
+    if ($content -match '(?m)^\s*\[model_providers\.codex_via_server_desktop\]\s*(?:#.*)?$') {
+        throw "The reserved desktop provider already exists outside the managed block"
+    }
+
+    $lines = @($content -split '\r?\n')
+    $kept = [System.Collections.Generic.List[string]]::new()
+    $atRoot = $true
+    foreach ($line in $lines) {
+        if ($atRoot -and $line -match '^\s*\[') { $atRoot = $false }
+        if ($atRoot -and $line -match '^\s*model_provider\s*=') { continue }
+        $kept.Add($line)
+    }
+    $preserved = ($kept -join "`r`n").Trim()
+    $rootBlock = @(
+        $script:DesktopRootBegin,
+        "model_provider = `"$($script:DesktopProviderName)`"",
+        $script:DesktopRootEnd
+    ) -join "`r`n"
+    $providerBlock = @(
+        $script:DesktopProviderBegin,
+        "[model_providers.$($script:DesktopProviderName)]",
+        'name = "Codex via Server persistent tunnel"',
+        "base_url = `"http://127.0.0.1:$($Profile.client.local_port)/v1`"",
+        'wire_api = "responses"',
+        'supports_websockets = false',
+        'requires_openai_auth = false',
+        $script:DesktopProviderEnd
+    ) -join "`r`n"
+    $parts = @($rootBlock)
+    if ($preserved) { $parts += $preserved }
+    $parts += $providerBlock
+    Set-Content -LiteralPath $configPath -Value (($parts -join "`r`n`r`n") + "`r`n") -Encoding utf8NoBOM
+    Set-CvsPrivateAcl $configPath
+    return $configPath
+}
+
+function Restore-CvsDesktopCodexConfig {
+    $configPath = Join-Path (Get-CvsCodexHome) "config.toml"
+    $backupPath = Get-CvsDesktopBackupPath
+    $absentMarker = Get-CvsDesktopAbsentMarkerPath
+    if ((Test-Path -LiteralPath $backupPath) -and (Test-Path -LiteralPath $absentMarker)) { throw "Desktop configuration backup state is inconsistent" }
+    if (Test-Path -LiteralPath $backupPath) {
+        if ((Test-Path -LiteralPath $configPath) -and (Get-Item -LiteralPath $configPath -Force).LinkType) { throw "Codex config is unsafe" }
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $configPath) | Out-Null
+        Copy-Item -LiteralPath $backupPath -Destination $configPath -Force
+        Set-CvsPrivateAcl $configPath
+        Remove-Item -LiteralPath $backupPath -Force
+    } elseif (Test-Path -LiteralPath $absentMarker) {
+        if (Test-Path -LiteralPath $configPath) {
+            $item = Get-Item -LiteralPath $configPath -Force
+            if ($item.LinkType -or $item.PSIsContainer) { throw "Codex config is unsafe" }
+            Remove-Item -LiteralPath $configPath -Force
+        }
+        Remove-Item -LiteralPath $absentMarker -Force
+    } elseif (Test-Path -LiteralPath $configPath) {
+        $content = Get-Content -LiteralPath $configPath -Raw
+        if ($content.Contains($script:DesktopRootBegin) -or $content.Contains($script:DesktopProviderBegin)) {
+            throw "Cannot restore Codex config because the desktop backup is missing"
+        }
+    }
+}
+
+function Get-CvsCurrentUserId {
+    return [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+}
+
+function Register-CvsDesktopTask {
+    $installRoot = Get-CvsInstallRoot
+    $tunnelScript = Join-Path $installRoot "persistent-tunnel.ps1"
+    if (-not (Test-Path -LiteralPath $tunnelScript -PathType Leaf) -or (Get-Item -LiteralPath $tunnelScript -Force).LinkType) {
+        throw "Persistent tunnel script is missing or unsafe"
+    }
+    $pwsh = Get-CvsExecutable "CODEX_VIA_SERVER_PWSH" "pwsh.exe"
+    $userId = Get-CvsCurrentUserId
+    $actionArguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $tunnelScript.Replace('"', '""')
+    $action = New-ScheduledTaskAction -Execute $pwsh -Argument $actionArguments -WorkingDirectory $installRoot
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
+    $settings = New-ScheduledTaskSettingsSet -Hidden -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
+    $task = New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings -Principal $principal
+    Register-ScheduledTask -TaskName $script:DesktopTaskName -InputObject $task -Force | Out-Null
+}
+
+function Remove-CvsDesktopTask {
+    $task = Get-ScheduledTask -TaskName $script:DesktopTaskName -ErrorAction SilentlyContinue
+    if (-not $task) { return }
+    Stop-ScheduledTask -TaskName $script:DesktopTaskName -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $script:DesktopTaskName -Confirm:$false
+}
+
+function Wait-CvsDesktopGateway {
+    param([Parameter(Mandatory)][int]$Port, [int]$Attempts = 15)
+    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+        $managed = Get-CvsManagedTunnelProcess
+        if ($managed -and (Test-CvsGatewayModels -Port $Port)) { return $true }
+        Start-Sleep -Seconds 1
+    }
+    return $false
+}
+
+function Stop-CvsDesktopRuntime {
+    [CmdletBinding()]
+    param()
+    $profile = Get-CvsConnectionProfile
+    $process = Get-CvsManagedTunnelProcess -Profile $profile
+    if ($process -and -not $process.HasExited) {
+        Stop-Process -Id $process.Id -Force
+        return $true
+    }
+    return $false
+}
+
+function Install-CvsDesktop {
+    [CmdletBinding()]
+    param()
+    $profile = Get-CvsConnectionProfile
+    Backup-CvsDesktopCodexConfig
+    try {
+        Set-CvsDesktopCodexConfig -Profile $profile | Out-Null
+        Register-CvsDesktopTask
+        Start-ScheduledTask -TaskName $script:DesktopTaskName
+        if (-not (Wait-CvsDesktopGateway -Port ([int]$profile.client.local_port))) { throw "Persistent tunnel health check failed" }
+        return [pscustomobject]@{Status="pass";TaskName=$script:DesktopTaskName;Url="http://127.0.0.1:$($profile.client.local_port)/v1"}
+    } catch {
+        Remove-CvsDesktopTask
+        try { Stop-CvsDesktopRuntime | Out-Null } catch {}
+        Restore-CvsDesktopCodexConfig
+        throw
+    }
+}
+
+function Get-CvsDesktopStatus {
+    [CmdletBinding()]
+    param()
+    $profile = Get-CvsConnectionProfile
+    $task = Get-ScheduledTask -TaskName $script:DesktopTaskName -ErrorAction SilentlyContinue
+    if (-not $task) { throw "Persistent tunnel task is not installed" }
+    $process = Get-CvsManagedTunnelProcess -Profile $profile
+    if (-not $process) { throw "Managed SSH tunnel is not running" }
+    if (-not (Test-CvsGatewayModels -Port ([int]$profile.client.local_port))) { throw "Persistent tunnel endpoint is unavailable" }
+    return [pscustomobject]@{Status="pass";TaskName=$script:DesktopTaskName;TaskState=[string]$task.State;ProcessId=$process.Id;Url="http://127.0.0.1:$($profile.client.local_port)/v1"}
+}
+
+function Restart-CvsDesktop {
+    [CmdletBinding()]
+    param()
+    $profile = Get-CvsConnectionProfile
+    if (-not (Get-ScheduledTask -TaskName $script:DesktopTaskName -ErrorAction SilentlyContinue)) { throw "Persistent tunnel task is not installed" }
+    Stop-ScheduledTask -TaskName $script:DesktopTaskName -ErrorAction SilentlyContinue
+    Stop-CvsDesktopRuntime | Out-Null
+    Start-ScheduledTask -TaskName $script:DesktopTaskName
+    if (-not (Wait-CvsDesktopGateway -Port ([int]$profile.client.local_port))) { throw "Persistent tunnel restart failed" }
+    return [pscustomobject]@{Status="pass";TaskName=$script:DesktopTaskName;Url="http://127.0.0.1:$($profile.client.local_port)/v1"}
+}
+
+function Uninstall-CvsDesktop {
+    [CmdletBinding()]
+    param()
+    Remove-CvsDesktopTask
+    try { Stop-CvsDesktopRuntime | Out-Null } catch [System.Management.Automation.ItemNotFoundException] {}
+    Restore-CvsDesktopCodexConfig
+    return [pscustomobject]@{Status="uninstalled";TaskName=$script:DesktopTaskName;ConfigRestored=$true}
+}
+
 function Get-CvsInstallRoot {
     if ($env:CODEX_VIA_SERVER_INSTALL_ROOT) { return $env:CODEX_VIA_SERVER_INSTALL_ROOT }
     return $script:ModuleRoot
@@ -371,12 +711,12 @@ function Update-CvsClient {
         if ((Get-FileHash $archive -Algorithm SHA256).Hash.ToLowerInvariant() -cne $expected) { throw "Release checksum mismatch" }
         Expand-Archive -LiteralPath $archive -DestinationPath $runtime
         $packageRoot = Join-Path $runtime "codex-via-server-windows"
-        foreach ($file in @("codex-via-server.ps1","CodexViaServer.psm1","VERSION")) {
+        foreach ($file in @("codex-via-server.ps1","CodexViaServer.psm1","persistent-tunnel.ps1","stop-persistent-tunnel.ps1","VERSION")) {
             $candidate = Join-Path $packageRoot $file
             if (-not (Test-Path $candidate) -or (Get-Item $candidate -Force).LinkType) { throw "Candidate file is missing or unsafe: $file" }
         }
         if ((Get-Content (Join-Path $packageRoot "VERSION") -Raw).Trim() -cne $latest) { throw "Package version mismatch" }
-        foreach ($scriptFile in @("codex-via-server.ps1","CodexViaServer.psm1")) {
+        foreach ($scriptFile in @("codex-via-server.ps1","CodexViaServer.psm1","persistent-tunnel.ps1","stop-persistent-tunnel.ps1")) {
             $tokens=$null;$errors=$null
             [System.Management.Automation.Language.Parser]::ParseFile((Join-Path $packageRoot $scriptFile),[ref]$tokens,[ref]$errors)|Out-Null
             if ($errors.Count -gt 0) { throw "Candidate PowerShell parse failed" }
@@ -404,12 +744,13 @@ function Uninstall-CvsClient {
     [CmdletBinding()]
     param([switch]$RemoveDeviceKey, [switch]$Yes)
     if ($RemoveDeviceKey -and -not $Yes) { throw "Removing the device key requires -Yes" }
+    Uninstall-CvsDesktop | Out-Null
     $root = Get-CvsRoot
     $config = Join-Path (Get-CvsConfigDirectory) "connection-profile.json"
     $deviceId=$null;$profileName="codex-via-server"
     if (Test-Path $config) { $profile=Get-Content $config -Raw|ConvertFrom-Json;$deviceId=$profile.approved_device.device_id;$profileName=$profile.client.codex_profile }
     if ($profileName -cnotmatch '^[A-Za-z0-9_-]{3,64}$') { throw "Unsafe profile name" }
-    $codexHome=if($env:CODEX_HOME){$env:CODEX_HOME}else{Join-Path $root ".codex"}
+    $codexHome=Get-CvsCodexHome
     $targets=@((Get-CvsInstallRoot),$config,(Join-Path $codexHome "$profileName.config.toml"))
     $backup=Join-Path (Get-CvsStateDirectory) "uninstall-backups/$([DateTime]::UtcNow.ToString('yyyyMMddTHHmmssZ'))-$PID"
     New-Item -ItemType Directory -Force -Path $backup|Out-Null
@@ -418,4 +759,4 @@ function Uninstall-CvsClient {
     return [pscustomobject]@{Status="uninstalled";Backup=$backup;DeviceKeyRemoved=[bool]$RemoveDeviceKey}
 }
 
-Export-ModuleMember -Function Initialize-CvsDevice, Import-CvsConnectionProfile, Test-CvsVersionAtLeast, Start-CvsTunnel, Stop-CvsTunnel, Test-CvsDoctor, Invoke-CvsCodex, Update-CvsClient, Uninstall-CvsClient
+Export-ModuleMember -Function Initialize-CvsDevice, Import-CvsConnectionProfile, Test-CvsVersionAtLeast, Start-CvsTunnel, Stop-CvsTunnel, Test-CvsGatewayModels, Test-CvsDoctor, Invoke-CvsCodex, Install-CvsDesktop, Get-CvsDesktopStatus, Restart-CvsDesktop, Uninstall-CvsDesktop, Stop-CvsDesktopRuntime, Update-CvsClient, Uninstall-CvsClient

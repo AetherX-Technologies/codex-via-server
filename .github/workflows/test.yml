@@ -59,7 +59,7 @@ jobs:
         shell: pwsh
         run: |
           $configuration = New-PesterConfiguration
-          $configuration.Run.Path = @('./windows/tests/Setup.Tests.ps1', './windows/tests/Doctor.Tests.ps1', './windows/tests/Update.Tests.ps1')
+          $configuration.Run.Path = @('./windows/tests/Setup.Tests.ps1', './windows/tests/Doctor.Tests.ps1', './windows/tests/Desktop.Tests.ps1', './windows/tests/Update.Tests.ps1')
           $configuration.Run.PassThru = $true
           $configuration.Output.Verbosity = 'Detailed'
           $result = Invoke-Pester -Configuration $configuration

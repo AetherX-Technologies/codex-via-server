@@ -9,7 +9,9 @@ Describe "Windows update and uninstall" {
    New-Item -ItemType Directory -Force $env:CODEX_VIA_SERVER_INSTALL_ROOT|Out-Null
    Set-Content (Join-Path $env:CODEX_VIA_SERVER_INSTALL_ROOT "VERSION") "0.1.0"
    Set-Content (Join-Path $env:CODEX_VIA_SERVER_INSTALL_ROOT "codex-via-server.ps1") "old-script"
-   Set-Content (Join-Path $env:CODEX_VIA_SERVER_INSTALL_ROOT "CodexViaServer.psm1") "old-module"
+    Set-Content (Join-Path $env:CODEX_VIA_SERVER_INSTALL_ROOT "CodexViaServer.psm1") "old-module"
+    Set-Content (Join-Path $env:CODEX_VIA_SERVER_INSTALL_ROOT "persistent-tunnel.ps1") "old-tunnel"
+    Set-Content (Join-Path $env:CODEX_VIA_SERVER_INSTALL_ROOT "stop-persistent-tunnel.ps1") "old-stop"
   }
   AfterEach {Remove-Item Env:CODEX_VIA_SERVER_HOME,Env:CODEX_VIA_SERVER_INSTALL_ROOT,Env:CODEX_VIA_SERVER_TEST_FAIL_STAGE -ErrorAction SilentlyContinue}
 
@@ -24,7 +26,9 @@ Describe "Windows update and uninstall" {
    $package=Join-Path $TestDrive "package";New-Item -ItemType Directory -Force (Join-Path $package "codex-via-server-windows")|Out-Null
    Set-Content (Join-Path $package "codex-via-server-windows/VERSION") "0.2.0"
    Set-Content (Join-Path $package "codex-via-server-windows/codex-via-server.ps1") "param()"
-   Set-Content (Join-Path $package "codex-via-server-windows/CodexViaServer.psm1") "function Test-Module {}"
+    Set-Content (Join-Path $package "codex-via-server-windows/CodexViaServer.psm1") "function Test-Module {}"
+    Set-Content (Join-Path $package "codex-via-server-windows/persistent-tunnel.ps1") "param()"
+    Set-Content (Join-Path $package "codex-via-server-windows/stop-persistent-tunnel.ps1") "param()"
    $zip=Join-Path $TestDrive "client.zip";Compress-Archive (Join-Path $package "codex-via-server-windows") $zip
    $hash=(Get-FileHash $zip).Hash.ToLowerInvariant();$checks=Join-Path $TestDrive "checksums.txt";Set-Content $checks "$hash  codex-via-server-windows.zip"
    Mock Get-CvsLatestRelease {[pscustomobject]@{tag_name="v0.2.0";asset_url="asset";checksums_url="checksums"}}
@@ -39,7 +43,9 @@ Describe "Windows update and uninstall" {
    Set-Content (Join-Path $config "connection-profile.json") '{"approved_device":{"device_id":"device-01"},"client":{"codex_profile":"codex-via-server"}}'
    $keys=Get-CvsKeyDirectory;New-Item -ItemType Directory -Force $keys|Out-Null;Set-Content (Join-Path $keys "device-01") "key"
    $codex=Join-Path (Get-CvsRoot) ".codex";New-Item -ItemType Directory -Force $codex|Out-Null;Set-Content (Join-Path $codex "config.toml") "default";Set-Content (Join-Path $codex "codex-via-server.config.toml") "generated"
-   Uninstall-CvsClient|Out-Null
+    Mock Uninstall-CvsDesktop {}
+    Uninstall-CvsClient|Out-Null
+    Should -Invoke Uninstall-CvsDesktop -Times 1
    Test-Path (Join-Path $keys "device-01")|Should -BeTrue
    Test-Path (Join-Path $codex "config.toml")|Should -BeTrue
    Test-Path $env:CODEX_VIA_SERVER_INSTALL_ROOT|Should -BeFalse

@@ -19,11 +19,28 @@ switch ($Command) {
         Import-CvsConnectionProfile -Path $RemainingArguments[0]
     }
     "doctor" {
-        $live = $RemainingArguments -contains "--live"
-        $yes = $RemainingArguments -contains "--yes"
-        $modelIndex = [Array]::IndexOf($RemainingArguments, "--model")
-        $model = if ($modelIndex -ge 0) { $RemainingArguments[$modelIndex + 1] } else { $null }
+        $doctorArguments = @($RemainingArguments)
+        $live = $doctorArguments -contains "--live"
+        $yes = $doctorArguments -contains "--yes"
+        $modelIndex = [Array]::IndexOf($doctorArguments, "--model")
+        $model = if ($modelIndex -ge 0) { $doctorArguments[$modelIndex + 1] } else { $null }
         Test-CvsDoctor -Live:$live -Yes:$yes -Model $model
+    }
+    "desktop-install" {
+        if (@($RemainingArguments).Count -ne 0) { throw "desktop-install does not accept arguments" }
+        Install-CvsDesktop
+    }
+    "desktop-status" {
+        if (@($RemainingArguments).Count -ne 0) { throw "desktop-status does not accept arguments" }
+        Get-CvsDesktopStatus
+    }
+    "desktop-restart" {
+        if (@($RemainingArguments).Count -ne 0) { throw "desktop-restart does not accept arguments" }
+        Restart-CvsDesktop
+    }
+    "desktop-uninstall" {
+        if (@($RemainingArguments).Count -ne 0) { throw "desktop-uninstall does not accept arguments" }
+        Uninstall-CvsDesktop
     }
     "update" {
         Update-CvsClient -CheckOnly:($RemainingArguments -contains "--check-only") -Force:($RemainingArguments -contains "--force")
