@@ -6,6 +6,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 Import-Module (Join-Path $PSScriptRoot "CodexViaServer.psm1") -Force
+$RemainingArguments = @($RemainingArguments | Where-Object { $null -ne $_ })
 
 switch ($Command) {
     "setup" {
@@ -30,6 +31,10 @@ switch ($Command) {
         if (@($RemainingArguments).Count -ne 0) { throw "desktop-install does not accept arguments" }
         Install-CvsDesktop
     }
+    "desktop-start" {
+        if (@($RemainingArguments).Count -ne 0) { throw "desktop-start does not accept arguments" }
+        Start-CvsDesktop
+    }
     "desktop-status" {
         if (@($RemainingArguments).Count -ne 0) { throw "desktop-status does not accept arguments" }
         Get-CvsDesktopStatus
@@ -37,6 +42,10 @@ switch ($Command) {
     "desktop-restart" {
         if (@($RemainingArguments).Count -ne 0) { throw "desktop-restart does not accept arguments" }
         Restart-CvsDesktop
+    }
+    "desktop-stop" {
+        if (@($RemainingArguments).Count -ne 0) { throw "desktop-stop does not accept arguments" }
+        Stop-CvsDesktop
     }
     "desktop-uninstall" {
         if (@($RemainingArguments).Count -ne 0) { throw "desktop-uninstall does not accept arguments" }

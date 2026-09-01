@@ -51,6 +51,24 @@ function Get-CvsStateDirectory {
     return Join-Path (Get-CvsRoot) "state"
 }
 
+function Protect-CvsClientDirectories {
+    foreach ($directory in @((Get-CvsRoot), (Get-CvsConfigDirectory), (Get-CvsKeyDirectory), (Get-CvsStateDirectory))) {
+        New-Item -ItemType Directory -Force -Path $directory | Out-Null
+        Set-CvsPrivateAcl $directory
+    }
+}
+
+function Protect-CvsApprovedDeviceFiles {
+    param([Parameter(Mandatory)]$Profile)
+    $identity = Join-Path (Get-CvsKeyDirectory) ([string]$Profile.approved_device.device_id)
+    foreach ($keyPath in @($identity, "${identity}.pub")) {
+        if (-not (Test-Path -LiteralPath $keyPath)) { continue }
+        $item = Get-Item -LiteralPath $keyPath -Force
+        if ($item.LinkType -or $item.PSIsContainer) { throw "Device SSH identity is unsafe" }
+        Set-CvsPrivateAcl $keyPath
+    }
+}
+
 function Get-CvsConnectionProfile {
     $path = if ($env:CODEX_VIA_SERVER_CONNECTION_PROFILE) { $env:CODEX_VIA_SERVER_CONNECTION_PROFILE } else { Join-Path (Get-CvsConfigDirectory) "connection-profile.json" }
     $item = Get-Item -LiteralPath $path -Force
@@ -70,8 +88,15 @@ function Get-CvsExecutable {
 function Set-CvsPrivateAcl {
     param([Parameter(Mandatory)][string]$Path)
     if (-not $IsWindows) { return }
-    & icacls.exe $Path /inheritance:r /grant:r "${env:USERNAME}:(F)" | Out-Null
-    if ($LASTEXITCODE -ne 0) { throw "Failed to restrict ACL: $Path" }
+    $item = Get-Item -LiteralPath $Path -Force
+    $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($existingRule in @($acl.Access)) { [void]$acl.PurgeAccessRules($existingRule.IdentityReference) }
+    $inheritance = if ($item.PSIsContainer) { [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor [System.Security.AccessControl.InheritanceFlags]::ObjectInherit } else { [System.Security.AccessControl.InheritanceFlags]::None }
+    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().User
+    $rule = [System.Security.AccessControl.FileSystemAccessRule]::new($identity, [System.Security.AccessControl.FileSystemRights]::FullControl, $inheritance, [System.Security.AccessControl.PropagationFlags]::None, [System.Security.AccessControl.AccessControlType]::Allow)
+    [void]$acl.AddAccessRule($rule)
+    [System.IO.FileSystemAclExtensions]::SetAccessControl($item, $acl)
 }
 
 function Assert-CvsSafeOutputPath {
@@ -171,8 +196,9 @@ function Import-CvsConnectionProfile {
     $actualFingerprint = ($fingerprintOutput -split '\s+')[1]
     if ($actualFingerprint -cne [string]$profile.approved_device.public_key_fingerprint) { throw "Approved device fingerprint does not match" }
 
+    Protect-CvsClientDirectories
+    Protect-CvsApprovedDeviceFiles -Profile $profile
     $configDirectory = Get-CvsConfigDirectory
-    New-Item -ItemType Directory -Force -Path $configDirectory | Out-Null
     $connectionTarget = Join-Path $configDirectory "connection-profile.json"
     Copy-Item -LiteralPath $Path -Destination $connectionTarget -Force
     Set-CvsPrivateAcl $connectionTarget
@@ -245,14 +271,14 @@ function New-CvsSshArguments {
     )
     return @(
         "-F", "NUL", "-p", [string]$Profile.server.ssh_port,
-        "-i", $Identity, "-N",
+        "-i", $Identity, "-N", "-T",
         "-L", "127.0.0.1:$($Profile.client.local_port):127.0.0.1:$($Profile.gateway.remote_port)",
         "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "PasswordAuthentication=no",
         "-o", "KbdInteractiveAuthentication=no", "-o", "StrictHostKeyChecking=yes",
         "-o", "UserKnownHostsFile=$KnownHosts", "-o", "GlobalKnownHostsFile=NUL",
         "-o", "UpdateHostKeys=no", "-o", "ProxyCommand=none", "-o", "ProxyJump=none",
         "-o", "PermitLocalCommand=no", "-o", "ExitOnForwardFailure=yes",
-        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "LogLevel=ERROR",
+        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "TCPKeepAlive=yes", "-o", "LogLevel=ERROR",
         "$($Profile.server.ssh_user)@$($Profile.server.host)"
     )
 }
@@ -335,7 +361,8 @@ function Get-CvsManagedTunnelProcess {
     [CmdletBinding()]
     param($Profile = (Get-CvsConnectionProfile))
     $listeners = @(Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort ([int]$Profile.client.local_port) -State Listen -ErrorAction SilentlyContinue)
-    foreach ($processId in @($listeners.OwningProcess | Where-Object { $_ } | Sort-Object -Unique)) {
+    $processIds = @($listeners | Where-Object { $null -ne $_ } | ForEach-Object { $_.OwningProcess } | Where-Object { $_ } | Sort-Object -Unique)
+    foreach ($processId in $processIds) {
         $processRecord = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $processId" -ErrorAction SilentlyContinue
         if (-not $processRecord) { continue }
         $executableName = if ($processRecord.ExecutablePath) { [System.IO.Path]::GetFileName([string]$processRecord.ExecutablePath) } else { [string]$processRecord.Name }
@@ -610,6 +637,8 @@ function Install-CvsDesktop {
     [CmdletBinding()]
     param()
     $profile = Get-CvsConnectionProfile
+    Protect-CvsClientDirectories
+    Protect-CvsApprovedDeviceFiles -Profile $profile
     Backup-CvsDesktopCodexConfig
     try {
         Set-CvsDesktopCodexConfig -Profile $profile | Out-Null
@@ -637,16 +666,30 @@ function Get-CvsDesktopStatus {
     return [pscustomobject]@{Status="pass";TaskName=$script:DesktopTaskName;TaskState=[string]$task.State;ProcessId=$process.Id;Url="http://127.0.0.1:$($profile.client.local_port)/v1"}
 }
 
-function Restart-CvsDesktop {
+function Start-CvsDesktop {
     [CmdletBinding()]
     param()
     $profile = Get-CvsConnectionProfile
     if (-not (Get-ScheduledTask -TaskName $script:DesktopTaskName -ErrorAction SilentlyContinue)) { throw "Persistent tunnel task is not installed" }
-    Stop-ScheduledTask -TaskName $script:DesktopTaskName -ErrorAction SilentlyContinue
-    Stop-CvsDesktopRuntime | Out-Null
     Start-ScheduledTask -TaskName $script:DesktopTaskName
-    if (-not (Wait-CvsDesktopGateway -Port ([int]$profile.client.local_port))) { throw "Persistent tunnel restart failed" }
+    if (-not (Wait-CvsDesktopGateway -Port ([int]$profile.client.local_port))) { throw "Persistent tunnel start failed" }
     return [pscustomobject]@{Status="pass";TaskName=$script:DesktopTaskName;Url="http://127.0.0.1:$($profile.client.local_port)/v1"}
+}
+
+function Stop-CvsDesktop {
+    [CmdletBinding()]
+    param()
+    if (-not (Get-ScheduledTask -TaskName $script:DesktopTaskName -ErrorAction SilentlyContinue)) { throw "Persistent tunnel task is not installed" }
+    Stop-ScheduledTask -TaskName $script:DesktopTaskName -ErrorAction SilentlyContinue
+    $runtimeStopped = Stop-CvsDesktopRuntime
+    return [pscustomobject]@{Status="stopped";TaskName=$script:DesktopTaskName;RuntimeStopped=[bool]$runtimeStopped}
+}
+
+function Restart-CvsDesktop {
+    [CmdletBinding()]
+    param()
+    Stop-CvsDesktop | Out-Null
+    return Start-CvsDesktop
 }
 
 function Uninstall-CvsDesktop {
@@ -724,6 +767,10 @@ function Update-CvsClient {
         if (Test-Path $installRoot) { Copy-Item $installRoot (Join-Path $backup "install") -Recurse -Force } else { New-Item -ItemType File (Join-Path $backup "install.absent") | Out-Null }
         New-Item -ItemType Directory -Force -Path $installRoot | Out-Null
         Copy-Item (Join-Path $packageRoot "*") $installRoot -Recurse -Force
+        Set-CvsPrivateAcl $installRoot
+        foreach ($file in @("codex-via-server.ps1","CodexViaServer.psm1","persistent-tunnel.ps1","stop-persistent-tunnel.ps1","VERSION")) {
+            Set-CvsPrivateAcl (Join-Path $installRoot $file)
+        }
         if ($env:CODEX_VIA_SERVER_TEST_FAIL_STAGE -eq "after-copy") { throw "Injected update failure" }
         $committed=$true
         return [pscustomobject]@{Status="updated";Version=$latest;Backup=$backup}
@@ -759,4 +806,4 @@ function Uninstall-CvsClient {
     return [pscustomobject]@{Status="uninstalled";Backup=$backup;DeviceKeyRemoved=[bool]$RemoveDeviceKey}
 }
 
-Export-ModuleMember -Function Initialize-CvsDevice, Import-CvsConnectionProfile, Test-CvsVersionAtLeast, Start-CvsTunnel, Stop-CvsTunnel, Test-CvsGatewayModels, Test-CvsDoctor, Invoke-CvsCodex, Install-CvsDesktop, Get-CvsDesktopStatus, Restart-CvsDesktop, Uninstall-CvsDesktop, Stop-CvsDesktopRuntime, Update-CvsClient, Uninstall-CvsClient
+Export-ModuleMember -Function Initialize-CvsDevice, Import-CvsConnectionProfile, Test-CvsVersionAtLeast, Set-CvsPrivateAcl, Start-CvsTunnel, Stop-CvsTunnel, Test-CvsGatewayModels, Test-CvsDoctor, Invoke-CvsCodex, Install-CvsDesktop, Start-CvsDesktop, Get-CvsDesktopStatus, Restart-CvsDesktop, Stop-CvsDesktop, Uninstall-CvsDesktop, Stop-CvsDesktopRuntime, Update-CvsClient, Uninstall-CvsClient

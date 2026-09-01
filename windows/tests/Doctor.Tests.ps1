@@ -69,6 +69,8 @@ Describe "Windows doctor and launcher" {
             $joined | Should -Match 'PasswordAuthentication=no'
             $joined | Should -Match 'ProxyCommand=none'
             $joined | Should -Match 'ProxyJump=none'
+            $joined | Should -Match '(?:^|\s)-T(?:\s|$)'
+            $joined | Should -Match 'TCPKeepAlive=yes'
             $joined | Should -Not -Match 'api.key|Authorization|CLIPROXY'
             $tunnel.Profile.server.ssh_user | Should -Be 'codex-tunnel'
         }

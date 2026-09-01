@@ -9,7 +9,10 @@ Describe "Windows desktop persistent tunnel" {
             $env:CODEX_VIA_SERVER_INSTALL_ROOT = Join-Path $TestDrive "install-$caseId"
             $env:CODEX_HOME = Join-Path $TestDrive "codex-$caseId"
             New-Item -ItemType Directory -Force -Path $env:CODEX_VIA_SERVER_INSTALL_ROOT,$env:CODEX_HOME | Out-Null
+            New-Item -ItemType Directory -Force -Path (Join-Path $env:CODEX_VIA_SERVER_HOME "keys") | Out-Null
             Set-Content -LiteralPath (Join-Path $env:CODEX_VIA_SERVER_INSTALL_ROOT "persistent-tunnel.ps1") -Value "param()"
+            Set-Content -LiteralPath (Join-Path $env:CODEX_VIA_SERVER_HOME "keys\windows-test-01") -Value "private-test-fixture"
+            Set-Content -LiteralPath (Join-Path $env:CODEX_VIA_SERVER_HOME "keys\windows-test-01.pub") -Value "public-test-fixture"
             $script:DesktopProfile = [pscustomobject]@{
                 server = [pscustomobject]@{host="100.64.10.20";ssh_port=22;ssh_user="codex-tunnel";host_fingerprints=@("SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")}
                 gateway = [pscustomobject]@{remote_host="127.0.0.1";remote_port=18319}
@@ -49,6 +52,13 @@ base_url = "https://example.invalid/v1"
             $managed | Should -Match 'requires_openai_auth = false'
             ([regex]::Matches($managed, '\[model_providers\.codex_via_server_desktop\]').Count) | Should -Be 1
             (Get-Content -LiteralPath (Get-CvsDesktopBackupPath) -Raw).Trim() | Should -Be $original.Trim()
+            if ($IsWindows) {
+                foreach ($privatePath in @($env:CODEX_VIA_SERVER_HOME, (Get-CvsConfigDirectory), $configPath, (Join-Path $env:CODEX_VIA_SERVER_HOME "keys\windows-test-01"))) {
+                    $privateAcl = Get-Acl -LiteralPath $privatePath
+                    $privateAcl.AreAccessRulesProtected | Should -BeTrue
+                    @($privateAcl.Access).Count | Should -Be 1
+                }
+            }
             Should -Invoke Register-CvsDesktopTask -Times 2
         }
 
@@ -74,6 +84,34 @@ base_url = "https://example.invalid/v1"
             Should -Invoke Stop-ScheduledTask -Times 1
             Should -Invoke Start-ScheduledTask -Times 1
             Should -Invoke Wait-CvsDesktopGateway -Times 1
+        }
+
+        It "starts an installed task and verifies the endpoint" {
+            Mock Get-ScheduledTask { [pscustomobject]@{State="Ready"} }
+            $result = Start-CvsDesktop
+            $result.Status | Should -Be "pass"
+            Should -Invoke Start-ScheduledTask -Times 1
+            Should -Invoke Wait-CvsDesktopGateway -Times 1
+        }
+
+        It "stops the task and only the managed tunnel runtime" {
+            Mock Get-ScheduledTask { [pscustomobject]@{State="Running"} }
+            Mock Stop-ScheduledTask {}
+            Mock Stop-CvsDesktopRuntime { $true }
+            $result = Stop-CvsDesktop
+            $result.Status | Should -Be "stopped"
+            Should -Invoke Stop-ScheduledTask -Times 1
+            Should -Invoke Stop-CvsDesktopRuntime -Times 1
+        }
+
+        It "routes start and stop commands and protects persistent state" {
+            $dispatcher = Get-Content -LiteralPath (Join-Path $script:ModuleRoot "codex-via-server.ps1") -Raw
+            $persistent = Get-Content -LiteralPath (Join-Path $script:ModuleRoot "persistent-tunnel.ps1") -Raw
+            $dispatcher | Should -Match '"desktop-start"'
+            $dispatcher | Should -Match '"desktop-stop"'
+            $persistent | Should -Match 'Set-CvsPrivateAcl\s+\$stateDirectory'
+            $persistent | Should -Match 'Set-CvsPrivateAcl\s+\$logPath'
+            $persistent | Should -Match 'Start-Sleep -Seconds 5'
         }
     }
 }
@@ -108,6 +146,13 @@ Describe "Windows managed SSH process ownership" {
             Mock Get-CimInstance { [pscustomobject]@{Name="ssh.exe";ExecutablePath="C:\Windows\System32\OpenSSH\ssh.exe";CommandLine=$script:ManagedCommandLine} }
             $process = Get-CvsManagedTunnelProcess -Profile $script:ProcessProfile
             $process.Id | Should -Be 4321
+        }
+
+        It "returns no process when the approved port has no listener" {
+            Mock Get-NetTCPConnection { $null }
+            Mock Get-CimInstance {}
+            Get-CvsManagedTunnelProcess -Profile $script:ProcessProfile | Should -BeNullOrEmpty
+            Should -Invoke Get-CimInstance -Times 0
         }
 
         It "rejects an SSH listener with a different forwarding target" {
@@ -188,5 +233,10 @@ Describe "Windows command dispatcher" {
         }
         $exitCode | Should -Not -Be 0
         ($output | Out-String) | Should -Not -Match 'Value cannot be null|IndexOf'
+    }
+
+    It "accepts desktop commands with no optional arguments" {
+        $dispatcher = Get-Content -LiteralPath $DispatcherScript -Raw
+        $dispatcher | Should -Match '\$RemainingArguments = @\(\$RemainingArguments \| Where-Object'
     }
 }

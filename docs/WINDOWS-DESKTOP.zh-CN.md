@@ -100,9 +100,15 @@ requires_openai_auth = false
 
 ```powershell
 & $Client desktop-status
+& $Client desktop-start
 & $Client desktop-restart
+& $Client desktop-stop
 & $Client doctor --live --yes --model <MODEL_ID>
 ```
+
+`desktop-stop` 只停止任务和托管隧道，不删除任务计划或 Codex 配置；随后可用
+`desktop-start` 恢复，无需重新申请设备。任务使用 `IgnoreNew` 策略，防止计划任务
+重复启动多个隧道进程。
 
 常驻隧道日志位于：
 
@@ -131,6 +137,9 @@ tailscale status
 客户端只有在监听进程确实是 `ssh.exe`，并且完整命令行同时匹配批准的设备密钥、
 本地/远端端口、受限 SSH 参数以及批准的 `user@host` 时，才会复用或结束该进程。
 仅仅能返回 `/v1/models` 的其他程序绝不会被认作本项目隧道。
+
+出站 SSH 客户端使用非交互的 `-N -T`，并在 15 秒应用层存活探测之外显式设置
+`TCPKeepAlive=yes`。安装脚本、状态目录和隧道日志都使用仅限当前用户的受保护 ACL。
 
 ## 回滚
 

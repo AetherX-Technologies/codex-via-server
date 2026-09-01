@@ -11,6 +11,7 @@ $logPath = Join-Path $stateDirectory "persistent-tunnel.log"
 
 New-Item -ItemType Directory -Force -Path $stateDirectory | Out-Null
 Import-Module $module -Force
+Set-CvsPrivateAcl $stateDirectory
 
 function Write-CvsPersistentLog {
     param([Parameter(Mandatory)][string]$Message)
@@ -18,6 +19,7 @@ function Write-CvsPersistentLog {
         Move-Item -LiteralPath $logPath -Destination "${logPath}.1" -Force
     }
     Add-Content -LiteralPath $logPath -Value ("{0} {1}" -f [DateTimeOffset]::Now.ToString("o"), $Message) -Encoding utf8NoBOM
+    Set-CvsPrivateAcl $logPath
 }
 
 Write-CvsPersistentLog "persistent tunnel service started"
@@ -43,7 +45,7 @@ try {
         } finally {
             if ($tunnel) { Stop-CvsTunnel $tunnel }
         }
-        Start-Sleep -Seconds 15
+        Start-Sleep -Seconds 5
     }
 } finally {
     Write-CvsPersistentLog "persistent tunnel service stopped"

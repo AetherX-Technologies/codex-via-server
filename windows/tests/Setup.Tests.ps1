@@ -89,5 +89,18 @@ Describe "Windows setup and enrollment" {
         Test-Path (Join-Path $installRoot "persistent-tunnel.ps1") | Should -BeTrue
         Test-Path (Join-Path $installRoot "stop-persistent-tunnel.ps1") | Should -BeTrue
         Test-Path (Join-Path $installRoot "VERSION") | Should -BeTrue
+        if ($IsWindows) {
+            $currentSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+            $rootAcl = Get-Acl -LiteralPath $installRoot
+            $rootAcl.AreAccessRulesProtected | Should -BeTrue
+            @($rootAcl.Access).Count | Should -Be 1
+            $rootAcl.Access[0].IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value | Should -Be $currentSid
+            foreach ($name in @("codex-via-server.ps1", "CodexViaServer.psm1", "persistent-tunnel.ps1", "stop-persistent-tunnel.ps1", "VERSION")) {
+                $fileAcl = Get-Acl -LiteralPath (Join-Path $installRoot $name)
+                $fileAcl.AreAccessRulesProtected | Should -BeTrue
+                @($fileAcl.Access).Count | Should -Be 1
+                $fileAcl.Access[0].IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value | Should -Be $currentSid
+            }
+        }
     }
 }

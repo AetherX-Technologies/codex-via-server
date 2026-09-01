@@ -12,6 +12,7 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
 - Add Windows PowerShell 7 enrollment, doctor, update, and uninstall commands.
 - Add a current-user Scheduled Task for an optional persistent Codex desktop
   tunnel, including status, restart, and rollback commands.
+- Add explicit start and stop commands for an installed Windows desktop tunnel.
 - Add English and Simplified Chinese Windows desktop deployment and recovery
   documentation.
 
@@ -24,6 +25,8 @@ and this project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.ht
   `requires_openai_auth = false`, while preserving a one-time backup for exact
   rollback.
 - Accept Tailscale DERP reachability without weakening SSH host-key pinning.
+- Harden Windows persistence with `-N -T`, `TCPKeepAlive=yes`, duplicate-task
+  suppression, and protected current-user ACLs for installed scripts and logs.
 
 ## [0.1.0] - 2026-08-31
 

@@ -105,9 +105,15 @@ this server-side credential-injection design.
 
 ```powershell
 & $Client desktop-status
+& $Client desktop-start
 & $Client desktop-restart
+& $Client desktop-stop
 & $Client doctor --live --yes --model <MODEL_ID>
 ```
+
+`desktop-stop` leaves the Scheduled Task and Codex configuration installed, so
+`desktop-start` can bring the tunnel back without re-enrollment. The task uses
+`IgnoreNew` instance policy to prevent duplicate scheduled tunnel processes.
 
 The persistent tunnel log is stored at:
 
@@ -139,6 +145,11 @@ The client will reuse or terminate a listener only when its process is `ssh.exe`
 and its complete command line matches the approved key, local and remote ports,
 restricted SSH options, and approved `user@host`. A program that merely returns
 a valid-looking `/v1/models` response is never treated as project-owned.
+
+The outbound SSH client is non-interactive (`-N -T`) and explicitly enables
+`TCPKeepAlive=yes` together with the application-level 15-second server-alive
+probe. Installed scripts, the state directory, and tunnel logs use protected
+current-user ACLs.
 
 ## Roll back
 
