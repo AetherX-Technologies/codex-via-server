@@ -1,130 +1,110 @@
-# macOS persistent desktop tunnel design
+# macOS 桌面端常驻隧道设计
 
-Date: 2026-09-01
+日期：2026-09-01
 
-Status: approved design, pending implementation
+状态：设计已确认，等待实施
 
-Target release: `v0.2.0`
+目标版本：`v0.2.0`
 
-## Problem
+## 问题
 
-The v0.2 restricted SSH tunnel currently exists only while
-`codex-via-server` is running. The Codex desktop app starts independently, so
-its configured endpoint `http://127.0.0.1:18319/v1` has no listener and reports
-repeated connection failures.
+当前 v0.2 的受限 SSH 隧道只在运行 `codex-via-server` 命令期间存在。Codex 桌面端独立启动，因此访问 `http://127.0.0.1:18319/v1` 时本机没有进程监听，持续显示重新连接和请求失败。
 
-The fix must keep the real CLIProxyAPI key on the server, survive login and
-network changes, work with Tailscale and Shadowrocket enabled, and preserve the
-existing CLI and rollback paths.
+修复后必须满足：真实 CLIProxyAPI Key 继续只保存在服务器；Mac 登录后自动可用；网络切换或短暂断线后自动恢复；兼容同时开启 Tailscale 和 Shadowrocket；保留旧 CLI 用法和回滚能力。
 
-## Decision
+## 方案
 
-Install a per-user macOS LaunchAgent that maintains the restricted SSH local
-forward:
+安装当前 macOS 用户级别的 LaunchAgent，由它长期维护受限 SSH 本地转发：
 
 ```text
-Codex desktop
+Codex 桌面端
   -> 127.0.0.1:18319
-  -> launchd-managed restricted SSH tunnel over Tailscale
-  -> server 127.0.0.1:18319 gateway
+  -> launchd 管理的受限 SSH 隧道（通过 Tailscale）
+  -> 服务器 127.0.0.1:18319 网关
   -> CLIProxyAPI
 ```
 
-The LaunchAgent runs the system `ssh` binary directly. It uses the enrolled
-per-device key, strict host-key checking, local forwarding only, no shell, no
-agent forwarding, and SSH keepalives. `launchd` starts it at login and restarts
-it after failures. No third-party daemon such as `autossh` is required.
+LaunchAgent 直接运行 macOS 自带的 `ssh`，使用每台设备独立的受限密钥、严格服务器指纹校验、仅允许本地端口转发、禁止远程 shell，并启用 SSH 保活。登录时自动启动，断线后由 `launchd` 自动重启，不额外安装 `autossh`。
 
-## Components
+## 组成部分
 
-### Persistent tunnel command
+### 常驻隧道命令
 
-A generated local script reads and validates `connection-profile.json`, builds
-a temporary verified `known_hosts` file from the approved fingerprints, and
-executes:
+本地脚本读取并严格校验 `connection-profile.json`，根据已批准的服务器指纹生成临时 `known_hosts`，然后执行：
 
 ```text
-ssh -N -T -L 127.0.0.1:<local-port>:127.0.0.1:<gateway-port> ...
+ssh -N -T -L 127.0.0.1:<本机端口>:127.0.0.1:<服务器网关端口> ...
 ```
 
-It refuses public or arbitrary forwarding destinations. It does not read,
-store, or transmit the CLIProxyAPI bearer key.
+脚本拒绝公网地址和任意转发目标，不读取、不保存、也不传输 CLIProxyAPI 的真实 Key。
 
 ### LaunchAgent
 
-`~/Library/LaunchAgents/com.aetherx.codex-via-server-tunnel.plist` will use:
+安装文件：
 
-- `RunAtLoad` for login startup.
-- `KeepAlive` for automatic recovery.
-- a restart throttle to avoid tight failure loops.
-- private log files under `~/.local/state/codex-via-server/`.
-- the system SSH client and the enrolled device key.
+```text
+~/Library/LaunchAgents/com.aetherx.codex-via-server-tunnel.plist
+```
 
-Installation is idempotent. Existing files are backed up before replacement.
+配置包括：
 
-### Desktop Codex configuration
+- `RunAtLoad`：用户登录后自动启动。
+- `KeepAlive`：隧道退出后自动恢复。
+- 重启节流：避免异常时无限高速重试。
+- 私有日志目录：`~/.local/state/codex-via-server/`。
+- 仅使用系统 SSH 和当前设备的独立密钥。
 
-The installer backs up `~/.codex/config.toml`, then configures the desktop app's
-active provider to use:
+安装可以重复执行。替换已有文件前必须创建备份。
+
+### Codex 桌面端配置
+
+安装器先备份 `~/.codex/config.toml`，再把桌面端当前生效的 provider 指向：
 
 ```text
 http://127.0.0.1:18319/v1
 ```
 
-The provider requires no real client-side API key. If Codex requires an API-key
-environment variable syntactically, the LaunchAgent/app configuration uses a
-non-secret fixed placeholder; the server gateway overwrites Authorization.
+客户端不保存真实 Key。如果 Codex 在格式上强制要求 Key，则只使用固定的非敏感占位值；服务器网关会覆盖客户端发送的 Authorization。
 
-The existing `codex-via-server-v2` profile remains available for CLI use.
+现有 `codex-via-server-v2` profile 继续保留，供命令行使用。
 
-### CLI coexistence
+### 与命令行共存
 
-`codex-via-server` first probes an existing healthy persistent tunnel. When it
-is available, the CLI reuses it instead of failing because the local port is in
-use. If no persistent tunnel exists, the current temporary-tunnel behavior
-remains available.
+`codex-via-server` 启动时先检查常驻隧道。如果本机 `18319` 已由健康的常驻隧道提供，CLI 直接复用，不再因为“端口已占用”而失败。如果常驻隧道尚未安装，继续支持当前的临时隧道模式。
 
-### Management commands
+### 管理命令
 
-The macOS client adds:
+macOS 客户端增加：
 
-- `desktop-install`: install configuration and LaunchAgent.
-- `desktop-status`: verify launchd state, listener, models endpoint, and profile.
-- `desktop-restart`: reload the LaunchAgent and verify recovery.
-- `desktop-uninstall`: unload it and restore the backed-up desktop configuration.
+- `desktop-install`：安装桌面端配置和 LaunchAgent。
+- `desktop-status`：检查 launchd、监听端口、models 接口和 Codex 配置。
+- `desktop-restart`：重载 LaunchAgent 并验证自动恢复。
+- `desktop-uninstall`：卸载常驻隧道并恢复原桌面端配置。
 
-Uninstalling the desktop integration does not revoke the device. Device
-revocation remains a separate administrator operation.
+卸载桌面端集成不会撤销设备。设备撤销仍由管理员单独执行。
 
-## Failure handling
+## 故障处理
 
-- Tailscale unavailable: SSH exits; launchd retries with throttling.
-- Network changes: SSH keepalive detects the dead session; launchd reconnects.
-- Port occupied by an unrelated process: startup fails clearly and logs the
-  owning process; it never kills arbitrary processes.
-- Host fingerprint mismatch: tunnel refuses to connect.
-- Invalid enrollment profile or unsafe file permissions: installation aborts
-  before changing launchd or Codex configuration.
-- Failed post-install health check: unload the new LaunchAgent and restore the
-  previous Codex configuration.
+- Tailscale 不可用：SSH 退出，launchd 按节流策略重试。
+- 网络切换：SSH 保活检测断线，launchd 自动重连。
+- 端口被其他程序占用：明确报告占用进程，不杀死任何未知进程。
+- 服务器指纹变化：拒绝连接，防止连接到冒充服务器。
+- enrollment 配置错误或权限不安全：修改 launchd 和 Codex 配置前立即终止。
+- 安装后健康检查失败：卸载新 LaunchAgent，并恢复原 Codex 配置。
 
-## Verification
+## 验证要求
 
-Automated tests must prove:
+自动测试必须证明：
 
-1. The generated SSH command permits only the enrolled loopback gateway.
-2. The LaunchAgent starts at login and restarts after a simulated failure.
-3. A running persistent tunnel is reused by the CLI.
-4. `127.0.0.1:18319/v1/models` stays available after the invoking shell exits.
-5. No real API key appears in client files, environment, logs, or process args.
-6. Uninstall restores the previous desktop configuration.
+1. SSH 命令只允许转发到已登记的服务器 loopback 网关。
+2. LaunchAgent 登录后启动，并能在模拟断线后重新启动。
+3. CLI 能复用已经运行的常驻隧道。
+4. 启动命令退出后，`127.0.0.1:18319/v1/models` 仍持续可用。
+5. 客户端文件、环境变量、日志和进程参数中不存在真实 API Key。
+6. 卸载能够恢复此前的桌面端配置。
 
-The production acceptance check is the exact desktop failure signal: with no
-interactive CLI running, port `18319` remains listening and a real low-volume
-Responses request completes through the desktop endpoint.
+生产验收必须直接复现并验证用户遇到的问题：不运行任何交互式 CLI 时，`18319` 仍保持监听，并且通过桌面端使用的本地地址完成一次低用量真实 Responses 请求。
 
-## Rollback
+## 回滚
 
-Rollback unloads and removes the LaunchAgent, stops only its verified SSH
-process, restores the timestamped `~/.codex/config.toml` backup, and leaves the
-v0.1 launcher, server gateway, CLIProxyAPI, VPN, and enrolled device untouched.
+回滚时卸载 LaunchAgent，只停止经过身份确认的隧道进程，恢复带时间戳备份的 `~/.codex/config.toml`。旧 v0.1 launcher、服务器网关、CLIProxyAPI、VPN 和已批准设备均保持不变。
