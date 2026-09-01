@@ -47,8 +47,12 @@ codex_via_server_open_v2_tunnel() {
   esac
 
   if lsof -nP -iTCP:"$LOCAL_PORT" -sTCP:LISTEN >/dev/null 2>&1; then
-    printf 'codex-via-server: local port %s is already in use\n' "$LOCAL_PORT" >&2
-    return 1
+    models_response="$(curl --proxy '' --noproxy '*' --connect-timeout 3 --max-time 8 -fsS "http://127.0.0.1:${LOCAL_PORT}/v1/models")" \
+      || { printf 'codex-via-server: local port %s is occupied by an unhealthy service\n' "$LOCAL_PORT" >&2; return 1; }
+    printf '%s\n' "$models_response" | jq -e '.data | type == "array"' >/dev/null \
+      || { printf 'codex-via-server: local port %s returned an invalid response\n' "$LOCAL_PORT" >&2; return 1; }
+    SSH_MASTER_STARTED=0
+    return 0
   fi
 
   RUNTIME_DIR="$(mktemp -d /tmp/codex-via-server.XXXXXX)"

@@ -34,6 +34,8 @@ file_mode() {
 bash -n "${ROOT_DIR}/codex-via-server"
 bash -n "${ROOT_DIR}/install.sh"
 bash -n "${ROOT_DIR}/macos/lib/commands.sh"
+bash -n "${ROOT_DIR}/macos/lib/desktop.sh"
+bash -n "${ROOT_DIR}/macos/persistent-tunnel.sh"
 
 FAKE_BIN="${TEST_ROOT}/bin"
 FAKE_HOME="${TEST_ROOT}/home"
@@ -73,6 +75,8 @@ SETUP="${FAKE_HOME}/.local/lib/codex-via-server/setup.sh"
 ENROLL="${FAKE_HOME}/.local/lib/codex-via-server/enroll.sh"
 TUNNEL="${FAKE_HOME}/.local/lib/codex-via-server/tunnel.sh"
 DOCTOR="${FAKE_HOME}/.local/lib/codex-via-server/doctor.sh"
+DESKTOP="${FAKE_HOME}/.local/lib/codex-via-server/desktop.sh"
+PERSISTENT_TUNNEL="${FAKE_HOME}/.local/lib/codex-via-server/persistent-tunnel.sh"
 
 [[ -x "$LAUNCHER" ]] || fail "launcher was not installed"
 [[ -f "$CONFIG" ]] || fail "client config was not installed"
@@ -82,6 +86,8 @@ DOCTOR="${FAKE_HOME}/.local/lib/codex-via-server/doctor.sh"
 [[ -f "$ENROLL" ]] || fail "enroll command was not installed"
 [[ -f "$TUNNEL" ]] || fail "tunnel command was not installed"
 [[ -f "$DOCTOR" ]] || fail "doctor command was not installed"
+[[ -f "$DESKTOP" ]] || fail "desktop command was not installed"
+[[ -x "$PERSISTENT_TUNNEL" ]] || fail "persistent tunnel was not installed"
 [[ "$(file_mode "$LAUNCHER")" == "755" ]] || fail "launcher mode is not 755"
 [[ "$(file_mode "$CONFIG")" == "600" ]] || fail "config mode is not 600"
 [[ "$(file_mode "$PROFILE")" == "600" ]] || fail "profile mode is not 600"
@@ -90,6 +96,12 @@ DOCTOR="${FAKE_HOME}/.local/lib/codex-via-server/doctor.sh"
 [[ "$(file_mode "$ENROLL")" == "644" ]] || fail "enroll command mode is not 644"
 [[ "$(file_mode "$TUNNEL")" == "644" ]] || fail "tunnel command mode is not 644"
 [[ "$(file_mode "$DOCTOR")" == "644" ]] || fail "doctor command mode is not 644"
+[[ "$(file_mode "$DESKTOP")" == "644" ]] || fail "desktop command mode is not 644"
+[[ "$(file_mode "$PERSISTENT_TUNNEL")" == "755" ]] || fail "persistent tunnel mode is not 755"
+assert_contains "$PERSISTENT_TUNNEL" '-o StrictHostKeyChecking=yes'
+assert_contains "$PERSISTENT_TUNNEL" '-o ProxyCommand=none'
+assert_contains "$PERSISTENT_TUNNEL" '-N -T'
+assert_contains "$PERSISTENT_TUNNEL" '127.0.0.1:${local_port}:${remote_host}:${remote_port}'
 
 help_output="$(HOME="$FAKE_HOME" bash "$LAUNCHER" help)"
 printf '%s\n' "$help_output" | grep -q 'codex-via-server setup'
@@ -173,6 +185,7 @@ chmod 0755 \
 
 before_runtime_count="$(find /tmp -maxdepth 1 -name 'codex-via-server.*' | wc -l | tr -d ' ')"
 PATH="${FAKE_BIN}:${PATH}" \
+HOME="$FAKE_HOME" \
 CODEX_HOME="${FAKE_HOME}/.codex" \
 CODEX_VIA_SERVER_CONFIG="$CONFIG" \
 FAKE_STATE="$FAKE_STATE" \

@@ -114,6 +114,8 @@ TUNNEL_FILE="${LIB_DIR}/tunnel.sh"
 DOCTOR_FILE="${LIB_DIR}/doctor.sh"
 UPDATE_FILE="${LIB_DIR}/update.sh"
 UNINSTALL_FILE="${LIB_DIR}/uninstall.sh"
+DESKTOP_FILE="${LIB_DIR}/desktop.sh"
+PERSISTENT_TUNNEL_FILE="${LIB_DIR}/persistent-tunnel.sh"
 STATE_DIR="${HOME}/.local/share/codex-via-server"
 INSTALLED_VERSION_FILE="${STATE_DIR}/VERSION"
 
@@ -128,6 +130,8 @@ install -m 0644 "${SCRIPT_DIR}/macos/lib/tunnel.sh" "$TUNNEL_FILE"
 install -m 0644 "${SCRIPT_DIR}/macos/lib/doctor.sh" "$DOCTOR_FILE"
 install -m 0644 "${SCRIPT_DIR}/macos/lib/update.sh" "$UPDATE_FILE"
 install -m 0644 "${SCRIPT_DIR}/macos/lib/uninstall.sh" "$UNINSTALL_FILE"
+install -m 0644 "${SCRIPT_DIR}/macos/lib/desktop.sh" "$DESKTOP_FILE"
+install -m 0755 "${SCRIPT_DIR}/macos/persistent-tunnel.sh" "$PERSISTENT_TUNNEL_FILE"
 install -m 0644 "${SCRIPT_DIR}/VERSION" "$INSTALLED_VERSION_FILE"
 
 if [[ "$LEGACY_MODE" -eq 1 ]]; then

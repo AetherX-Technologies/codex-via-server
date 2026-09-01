@@ -788,3 +788,23 @@ Every task must meet its acceptance criteria and the following standing bar:
 There are no unresolved architecture decisions blocking implementation. Port
 numbers, server addresses, device names, and live maintenance windows are
 deployment inputs and are not stored in the public repository.
+
+## macOS 桌面端常驻隧道补充计划
+
+### Task 26：实现常驻受限隧道
+
+**验收标准：** 登录后自动启动；断线自动重连；只转发到登记的 loopback 网关；不接触真实 API Key。
+
+**验证：** 退出安装终端后，`127.0.0.1:18319/v1/models` 仍返回有效模型列表。
+
+### Task 27：增加桌面端管理与回滚
+
+**验收标准：** 支持 install/status/restart/uninstall；修改前备份 Codex 主配置；失败时自动恢复。
+
+**验证：** LaunchAgent 状态、配置、端口和卸载恢复测试通过。
+
+### Task 28：兼容 CLI 并完成真实验收
+
+**验收标准：** CLI 复用健康常驻隧道；桌面端本地 URL 完成低用量真实 Responses 请求。
+
+**验证：** 原始故障检查从 `http=000` 变为 `http=200`，且真实 canary 完成。

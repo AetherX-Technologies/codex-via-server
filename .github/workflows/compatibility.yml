@@ -1,0 +1,43 @@
+name: Compatibility matrix
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  matrix:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, windows-2025]
+        version: ["0.149.1", "0.150.0", "0.151.0"]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - run: npm install --global @openai/codex@${{ matrix.version }}
+      - name: Run compatibility contract
+        shell: bash
+        env:
+          EXPECTED_CODEX_VERSION: ${{ matrix.version }}
+        run: bash tests/test-codex-compatibility.sh
+
+  report:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 22
+      - run: node tests/report-upstream-versions.mjs

@@ -35,14 +35,14 @@
 
 ## Phase 5: Integration
 
-- [ ] Task 18: Add disposable end-to-end integration tests
-- [ ] Task 19: Add Codex and CLIProxyAPI compatibility jobs
+- [x] Task 18: Add disposable end-to-end integration tests
+- [x] Task 19: Add Codex and CLIProxyAPI compatibility jobs
 - [ ] Checkpoint E: Pre-production security and rollback review passes
 
 ## Phase 6: Production migration
 
-- [ ] Task 20: Deploy v0.2 server components without cutover
-- [ ] Task 21: Enroll and pilot the current Mac
+- [x] Task 20: Deploy v0.2 server components without cutover
+- [x] Task 21: Enroll and pilot the current Mac
 - [ ] Task 22: Enroll and pilot a Windows device
 - [ ] Task 23: Cut over to loopback-only CLIProxyAPI
 - [ ] Checkpoint F: Production cutover and rollback drill pass
@@ -52,3 +52,9 @@
 - [ ] Task 24: Publish migration and administration documentation
 - [ ] Task 25: Prepare and release v0.2.0
 - [ ] Final Definition of Done and explicit release approval
+
+## macOS desktop hotfix
+
+- [x] Task 26: Implement persistent restricted tunnel
+- [x] Task 27: Add desktop management and rollback
+- [x] Task 28: Reuse tunnel from CLI and pass desktop acceptance

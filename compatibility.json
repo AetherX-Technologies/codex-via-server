@@ -6,10 +6,10 @@
     "candidates": [
       "0.149.1",
       "0.150.0",
-      "0.151.0-alpha.7.2"
+      "0.151.0"
     ],
     "minimum_supported": null,
-    "last_tested": "0.151.0-alpha.7.2"
+    "last_tested": "0.151.0"
   },
   "cliproxyapi": {
     "minimum_supported": "7.2.146",

@@ -6,6 +6,7 @@
   "scripts": {
     "test:schemas": "node tests/validate-schemas.mjs",
     "test:compatibility": "node tests/validate-compatibility.mjs",
+    "test:codex": "node tests/test-codex-compatibility.mjs",
     "test:contracts": "npm run test:schemas && npm run test:compatibility"
   },
   "devDependencies": {

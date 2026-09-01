@@ -7,6 +7,10 @@ Usage:
   codex-via-server setup
   codex-via-server enroll <connection-profile.json>
   codex-via-server doctor [--live]
+  codex-via-server desktop-install
+  codex-via-server desktop-status
+  codex-via-server desktop-restart
+  codex-via-server desktop-uninstall
   codex-via-server update [--check-only]
   codex-via-server uninstall
   codex-via-server help
@@ -31,7 +35,7 @@ codex_via_server_version_at_least() {
 
 is_codex_via_server_command() {
   case "$1" in
-    setup|enroll|doctor|update|uninstall|help) return 0 ;;
+    setup|enroll|doctor|desktop-install|desktop-status|desktop-restart|desktop-uninstall|update|uninstall|help) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -57,6 +61,10 @@ run_codex_via_server_command() {
       source "$(codex_via_server_library_dir)/tunnel.sh"
       source "$(codex_via_server_library_dir)/doctor.sh"
       codex_via_server_doctor "$@"
+      ;;
+    desktop-install|desktop-status|desktop-restart|desktop-uninstall)
+      source "$(codex_via_server_library_dir)/desktop.sh"
+      "codex_via_server_${command_name//-/_}" "$@"
       ;;
     update)
       source "$(codex_via_server_library_dir)/update.sh"
