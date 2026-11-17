@@ -3,12 +3,12 @@ $ErrorActionPreference = "Stop"
 
 $script:ClientVersion = "0.2.0-dev.1"
 $script:ModuleRoot = $PSScriptRoot
-$script:DesktopTaskName = "CodexViaServer Persistent Tunnel"
 $script:DesktopProviderName = "codex_via_server_desktop"
 $script:DesktopRootBegin = "# BEGIN CODEX VIA SERVER DESKTOP ROOT"
 $script:DesktopRootEnd = "# END CODEX VIA SERVER DESKTOP ROOT"
 $script:DesktopProviderBegin = "# BEGIN CODEX VIA SERVER DESKTOP PROVIDER"
 $script:DesktopProviderEnd = "# END CODEX VIA SERVER DESKTOP PROVIDER"
+$script:LastTunnelSuccess = $null
 
 function Invoke-CvsSshKeygen {
     param([Parameter(Mandatory)][AllowEmptyString()][string[]]$Arguments)
@@ -89,6 +89,7 @@ function Set-CvsPrivateAcl {
     param([Parameter(Mandatory)][string]$Path)
     if (-not $IsWindows) { return }
     $item = Get-Item -LiteralPath $Path -Force
+    if($item.LinkType){throw 'unsafe_private_path'}
     $acl = Get-Acl -LiteralPath $Path -ErrorAction Stop
     $acl.SetAccessRuleProtection($true, $false)
     foreach ($existingRule in @($acl.Access)) { [void]$acl.PurgeAccessRules($existingRule.IdentityReference) }
@@ -224,43 +225,155 @@ stream_idle_timeout_ms = 300000
     return $connectionTarget
 }
 
+function Invoke-CvsBoundedNative {
+    param([string]$Executable, [string[]]$Arguments, [ValidateRange(1,120)][int]$TimeoutSec)
+    $info=[Diagnostics.ProcessStartInfo]::new()
+    $info.FileName=$Executable; $info.UseShellExecute=$false; $info.CreateNoWindow=$true
+    $info.RedirectStandardOutput=$true; $info.RedirectStandardError=$true
+    foreach($argument in $Arguments){$info.ArgumentList.Add($argument)}
+    $process=[Diagnostics.Process]::new(); $process.StartInfo=$info
+    try {
+        [void]$process.Start()
+        $stdout=$process.StandardOutput.ReadToEndAsync(); $stderr=$process.StandardError.ReadToEndAsync()
+        if(-not $process.WaitForExit($TimeoutSec*1000)){ $process.Kill(); throw 'native_timeout' }
+        if($process.ExitCode -ne 0){throw 'native_failed'}
+        return $stdout.GetAwaiter().GetResult()
+    } finally { $process.Dispose() }
+}
+
 function Get-CvsVerifiedKnownHosts {
-    param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][string]$RuntimeDirectory)
+    param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][string]$RuntimeDirectory, [ValidateRange(1,120)][int]$TimeoutSec=15)
     $keyscan = Get-CvsExecutable "CODEX_VIA_SERVER_SSH_KEYSCAN" "ssh-keyscan.exe"
     $keygen = Get-CvsExecutable "CODEX_VIA_SERVER_SSH_KEYGEN" "ssh-keygen.exe"
     $scanned = Join-Path $RuntimeDirectory "known_hosts.scanned"
     $verified = Join-Path $RuntimeDirectory "known_hosts"
-    & $keyscan -T 5 -p ([string]$Profile.server.ssh_port) ([string]$Profile.server.host) 2>$null | Set-Content -LiteralPath $scanned -Encoding utf8NoBOM
-    if ($LASTEXITCODE -ne 0) { throw "Cannot read server SSH host keys" }
+    $scanTimer=[Diagnostics.Stopwatch]::StartNew()
+    try { Invoke-CvsBoundedNative -Executable $keyscan -Arguments @('-T','5','-p',[string]$Profile.server.ssh_port,[string]$Profile.server.host) -TimeoutSec $TimeoutSec |
+        Set-Content -LiteralPath $scanned -Encoding utf8NoBOM } catch {throw 'ssh_host_key_unavailable'}
     foreach ($line in Get-Content -LiteralPath $scanned) {
         if (-not $line -or $line.StartsWith("#")) { continue }
         $candidate = Join-Path $RuntimeDirectory "candidate-key"
         Set-Content -LiteralPath $candidate -Value $line -Encoding utf8NoBOM
-        $fingerprintOutput = & $keygen -lf $candidate -E sha256 2>$null
-        if ($LASTEXITCODE -ne 0) { continue }
+        $remaining=[int][math]::Floor($TimeoutSec-$scanTimer.Elapsed.TotalSeconds)
+        if($remaining -lt 1){throw 'ssh_host_key_unavailable'}
+        try { $fingerprintOutput = Invoke-CvsBoundedNative -Executable $keygen -Arguments @('-lf',$candidate,'-E','sha256') -TimeoutSec $remaining } catch {continue}
         $fingerprint = ($fingerprintOutput -split '\s+')[1]
         if ($Profile.server.host_fingerprints -contains $fingerprint) { Add-Content -LiteralPath $verified -Value $line -Encoding utf8NoBOM }
     }
-    if (-not (Test-Path $verified)) { throw "Server SSH fingerprint changed" }
+    if (-not (Test-Path $verified)) { throw 'ssh_host_key_unavailable' }
     return $verified
 }
 
 function Test-CvsTailscaleReachability {
-    param([Parameter(Mandatory)][string]$HostName)
+    param([Parameter(Mandatory)][string]$HostName, [ValidateRange(1,120)][int]$TimeoutSec=10)
     $tailscale = Get-CvsExecutable "CODEX_VIA_SERVER_TAILSCALE" "tailscale.exe"
-    & $tailscale ping --timeout=5s --c=1 --until-direct=false $HostName *> $null
-    if ($LASTEXITCODE -ne 0) { throw "Tailscale cannot reach the server" }
+    Invoke-CvsBoundedNative -Executable $tailscale -Arguments @('ping','--timeout=5s','--c=1','--until-direct=false',$HostName) -TimeoutSec $TimeoutSec | Out-Null
 }
 
 function Test-CvsGatewayModels {
     [CmdletBinding()]
-    param([Parameter(Mandatory)][int]$Port)
+    param([Parameter(Mandatory)][int]$Port, [ValidateRange(5,60)][int]$TimeoutSec = 45)
     try {
-        $models = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/models" -TimeoutSec 2
+        $models = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/v1/models" -NoProxy -TimeoutSec $TimeoutSec -MaximumRedirection 0
         return ($models.data -is [array])
     } catch {
         return $false
     }
+}
+
+function Get-CvsTunnelPolicy {
+    $policy = [ordered]@{
+        HealthTimeoutSec=8; HealthIntervalSec=10; ConsecutiveFailureThreshold=3
+        MinUnhealthyDurationSec=45; ActiveSessionGraceSec=90; RestartCooldownSec=60
+        ReconnectBackoffSec=@(5,10,20,40,60); StartupBudgetSec=30; PortReleaseTimeoutSec=10
+    }
+    $path = Join-Path (Get-CvsConfigDirectory) 'runtime-policy.json'
+    if (Test-Path -LiteralPath $path) {
+        try {
+            $item = Get-Item -LiteralPath $path -Force
+            if ($item.LinkType -or $item.PSIsContainer) { throw 'unsafe policy' }
+            $overrides = Get-Content -LiteralPath $path -Raw | ConvertFrom-Json -AsHashtable
+            if ($overrides -isnot [System.Collections.IDictionary]) { throw 'policy must be an object' }
+            foreach ($key in $overrides.Keys) {
+                if (-not $policy.Contains($key)) { throw 'unknown policy key' }
+                $policy[$key] = $overrides[$key]
+            }
+        } catch { throw 'invalid_runtime_policy' }
+    }
+    $ranges = @{
+        HealthTimeoutSec=@(1,60); HealthIntervalSec=@(1,300); ConsecutiveFailureThreshold=@(2,20)
+        MinUnhealthyDurationSec=@(10,600); ActiveSessionGraceSec=@(45,1800)
+        RestartCooldownSec=@(10,600); StartupBudgetSec=@(5,120); PortReleaseTimeoutSec=@(1,30)
+    }
+    foreach ($key in $ranges.Keys) {
+        $value = $policy[$key]
+        if (($value -isnot [int] -and $value -isnot [long]) -or $value -lt $ranges[$key][0] -or $value -gt $ranges[$key][1]) { throw 'invalid_runtime_policy' }
+    }
+    $steps = $policy.ReconnectBackoffSec
+    if ($steps -isnot [array] -or $steps.Count -lt 1 -or $steps.Count -gt 10) { throw 'invalid_runtime_policy' }
+    $previous = 0
+    foreach ($step in $steps) {
+        if (($step -isnot [int] -and $step -isnot [long]) -or $step -lt 1 -or $step -gt 300 -or $step -lt $previous) { throw 'invalid_runtime_policy' }
+        $previous = $step
+    }
+    if ($policy.HealthTimeoutSec -gt $policy.StartupBudgetSec) { throw 'invalid_runtime_policy' }
+    return [pscustomobject]$policy
+}
+
+function Get-CvsPortListeners {
+    param([Parameter(Mandatory)][int]$Port)
+    return @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue |
+        Where-Object { $_.LocalAddress -in @('127.0.0.1','0.0.0.0','::','::1') })
+}
+
+function Test-CvsGatewayHealth {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][int]$Port, [ValidateRange(1,60)][int]$TimeoutSec=8, [switch]$Detailed, $Profile=(Get-CvsConnectionProfile))
+    $timer = [Diagnostics.Stopwatch]::StartNew()
+    $result = [ordered]@{Success=$false;Code='managed_listener_missing';DurationMs=0;HttpStatus=0}
+    # An arbitrary HTTP service occupying the approved port is not our tunnel.
+    $managed = Get-CvsManagedTunnelProcess -Profile $Profile
+    if ($Port -ne [int]$Profile.client.local_port -or -not $managed) {
+        if (@(Get-CvsPortListeners -Port $Port).Count) {
+            # SSH can bind between snapshots; validate the observed owner again.
+            if ($Port -eq [int]$Profile.client.local_port) { $managed=Get-CvsManagedTunnelProcess -Profile $Profile }
+            if ($Port -ne [int]$Profile.client.local_port -or -not $managed) { $result.Code='unmanaged_listener' }
+        }
+    }
+    if ($Port -eq [int]$Profile.client.local_port -and $managed) {
+        $probeLock=New-CvsMutex -Kind Health
+        $locked=$false
+        try {
+            try {$locked=$probeLock.WaitOne(0)} catch [Threading.AbandonedMutexException] {$locked=$true}
+            if(-not $locked){
+                $result.Code='health_probe_busy'
+                if($Detailed){return [pscustomobject]$result}; return $false
+            }
+            $response = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/healthz" -NoProxy -TimeoutSec $TimeoutSec -MaximumRedirection 0 -SkipHttpErrorCheck
+            $result.HttpStatus = [int]$response.StatusCode
+            $result.Success = ($result.HttpStatus -eq 204 -and $response.Content.Length -eq 0)
+            $result.Code = if ($result.Success) { 'healthy' } else { 'gateway_bad_status' }
+        } catch {
+            $errorObject = $_.Exception
+            $isTimeout = $false
+            while ($null -ne $errorObject) {
+                if ($errorObject -is [TimeoutException] -or $errorObject -is [OperationCanceledException] -or
+                    ($errorObject -is [System.Net.WebException] -and $errorObject.Status -eq 'Timeout')) { $isTimeout=$true }
+                $errorObject = $errorObject.InnerException
+            }
+            $result.Code = if ($isTimeout) { 'gateway_timeout' } else { 'gateway_connection_failed' }
+        } finally { if($locked){$probeLock.ReleaseMutex()}; $probeLock.Dispose() }
+    }
+    $result.DurationMs = $timer.ElapsedMilliseconds
+    if ($Detailed) { return [pscustomobject]$result }
+    return [bool]$result.Success
+}
+
+function New-CvsMutex {
+    param([ValidateSet('Health','Control')][string]$Kind)
+    $bytes=[Text.Encoding]::UTF8.GetBytes([IO.Path]::GetFullPath((Get-CvsRoot)).ToLowerInvariant())
+    $hash=[Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes))
+    return [Threading.Mutex]::new($false,"Local\CodexViaServer-$Kind-$hash")
 }
 
 function New-CvsSshArguments {
@@ -271,14 +384,14 @@ function New-CvsSshArguments {
     )
     return @(
         "-F", "NUL", "-p", [string]$Profile.server.ssh_port,
-        "-i", $Identity, "-N", "-T",
+        "-i", $Identity, "-N", "-T", "-C",
         "-L", "127.0.0.1:$($Profile.client.local_port):127.0.0.1:$($Profile.gateway.remote_port)",
         "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes", "-o", "PasswordAuthentication=no",
         "-o", "KbdInteractiveAuthentication=no", "-o", "StrictHostKeyChecking=yes",
         "-o", "UserKnownHostsFile=$KnownHosts", "-o", "GlobalKnownHostsFile=NUL",
         "-o", "UpdateHostKeys=no", "-o", "ProxyCommand=none", "-o", "ProxyJump=none",
         "-o", "PermitLocalCommand=no", "-o", "ExitOnForwardFailure=yes",
-        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "TCPKeepAlive=yes", "-o", "LogLevel=ERROR",
+        "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=3", "-o", "TCPKeepAlive=yes", "-o", "LogLevel=INFO",
         "$($Profile.server.ssh_user)@$($Profile.server.host)"
     )
 }
@@ -332,6 +445,10 @@ function Test-CvsManagedSshCommandLine {
     }
     if ($knownHostsIndex -lt 0) { return $false }
     $actual = @($tokens[1..($tokens.Count - 1)])
+    # Retain exact ownership of pre-compression connections during an upgrade.
+    if ($actual.Count -eq $template.Count - 1 -and $actual -cnotcontains '-C') {
+        $actual = @($actual[0..7]) + @('-C') + @($actual[8..($actual.Count - 1)])
+    }
     if ($actual.Count -ne $template.Count) { return $false }
 
     for ($i = 0; $i -lt $template.Count; $i++) {
@@ -340,6 +457,9 @@ function Test-CvsManagedSshCommandLine {
             try {
                 if ([System.IO.Path]::GetFullPath($actual[$i]) -ine $template[$i]) { return $false }
             } catch { return $false }
+        } elseif ($template[$i] -ceq 'LogLevel=INFO' -and $actual[$i] -ceq 'LogLevel=ERROR') {
+            # Retain the previous restricted connection when upgrading diagnostics.
+            continue
         } elseif ($actual[$i] -cne $template[$i]) {
             return $false
         }
@@ -352,14 +472,15 @@ function Test-CvsManagedSshCommandLine {
         $temporaryRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\', '/')
         $runtimeDirectory = Split-Path -Parent $knownHostsPath
         if ((Split-Path -Leaf $knownHostsPath) -cne "known_hosts") { return $false }
-        if (-not $runtimeDirectory.StartsWith((Join-Path $temporaryRoot "codex-via-server-"), [System.StringComparison]::OrdinalIgnoreCase)) { return $false }
+        if ((Split-Path -Parent $runtimeDirectory).TrimEnd('\','/') -ine $temporaryRoot -or
+            (Split-Path -Leaf $runtimeDirectory) -cnotmatch '^codex-via-server-[0-9a-f]{32}$') { return $false }
     } catch { return $false }
     return $true
 }
 
 function Get-CvsManagedTunnelProcess {
     [CmdletBinding()]
-    param($Profile = (Get-CvsConnectionProfile))
+    param($Profile = (Get-CvsConnectionProfile), [switch]$IncludeStarting)
     $listeners = @(Get-NetTCPConnection -LocalAddress "127.0.0.1" -LocalPort ([int]$Profile.client.local_port) -State Listen -ErrorAction SilentlyContinue)
     $processIds = @($listeners | Where-Object { $null -ne $_ } | ForEach-Object { $_.OwningProcess } | Where-Object { $_ } | Sort-Object -Unique)
     foreach ($processId in $processIds) {
@@ -370,6 +491,15 @@ function Get-CvsManagedTunnelProcess {
         if (-not (Test-CvsManagedSshCommandLine -Profile $Profile -CommandLine ([string]$processRecord.CommandLine))) { continue }
         return Get-Process -Id ([int]$processId) -ErrorAction SilentlyContinue
     }
+    if ($IncludeStarting -and $processIds.Count -eq 0) {
+        # Stopping a task can orphan SSH before it binds the forwarded port.
+        foreach ($record in @(Get-CimInstance Win32_Process -Filter "Name = 'ssh.exe'" -ErrorAction SilentlyContinue)) {
+            if (-not $record -or [IO.Path]::GetFileName([string]$record.ExecutablePath) -ine 'ssh.exe') { continue }
+            if (Test-CvsManagedSshCommandLine -Profile $Profile -CommandLine ([string]$record.CommandLine)) {
+                return Get-Process -Id ([int]$record.ProcessId) -ErrorAction SilentlyContinue
+            }
+        }
+    }
     return $null
 }
 
@@ -379,43 +509,148 @@ function Test-CvsLocalPortAvailable {
     try { $listener.Start() } catch { throw "Local port $Port is already in use" } finally { $listener.Stop() }
 }
 
+function Start-CvsSshProcess {
+    param([string]$Executable, [string[]]$Arguments)
+    if(-not ('CvsSshProcess' -as [type])){
+        Add-Type -TypeDefinition @'
+using System;
+using System.Diagnostics;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+public sealed class CvsSshProcess : IDisposable {
+    public Process Process { get; private set; }
+    private Task drain;
+    private string errorCode = "none";
+    public static CvsSshProcess Start(string executable, string[] arguments) {
+        var info = new ProcessStartInfo(executable) { UseShellExecute = false, CreateNoWindow = true, RedirectStandardError = true };
+        foreach (var argument in arguments) info.ArgumentList.Add(argument);
+        var result = new CvsSshProcess();
+        result.Process = Process.Start(info);
+        result.drain = result.Drain();
+        return result;
+    }
+    private void Classify(string line) {
+        string code = null;
+        if (line.Contains("not responding", StringComparison.OrdinalIgnoreCase)) code = "server_not_responding";
+        else if (line.Contains("Connection reset", StringComparison.OrdinalIgnoreCase) || line.Contains("forcibly closed", StringComparison.OrdinalIgnoreCase)) code = "connection_reset";
+        else if (line.Contains("Connection refused", StringComparison.OrdinalIgnoreCase)) code = "connection_refused";
+        else if (line.Contains("timed out", StringComparison.OrdinalIgnoreCase)) code = "connection_timeout";
+        else if (line.Contains("Connection closed", StringComparison.OrdinalIgnoreCase) || line.Contains("closed by remote host", StringComparison.OrdinalIgnoreCase)) code = "connection_closed";
+        else if (line.Contains("Host key verification failed", StringComparison.OrdinalIgnoreCase) || line.Contains("REMOTE HOST IDENTIFICATION HAS CHANGED", StringComparison.OrdinalIgnoreCase)) code = "host_key_rejected";
+        else if (line.Contains("Permission denied", StringComparison.OrdinalIgnoreCase)) code = "authentication_failed";
+        if (code != null) Volatile.Write(ref errorCode, code);
+        else if (errorCode == "none" && line.Length > 0) Volatile.Write(ref errorCode, "unclassified");
+    }
+    private async Task Drain() {
+        // Bound memory even when stderr has no newline; raw diagnostics never reach disk.
+        var buffer = new char[512];
+        var line = new StringBuilder(2048);
+        try {
+            int count;
+            while ((count = await Process.StandardError.ReadAsync(buffer, 0, buffer.Length).ConfigureAwait(false)) > 0) {
+                for (int i = 0; i < count; i++) {
+                    if (buffer[i] == '\n') { Classify(line.ToString()); line.Clear(); }
+                    else if (line.Length < 2048) line.Append(buffer[i]);
+                }
+            }
+            if (line.Length > 0) Classify(line.ToString());
+        } catch { if (errorCode == "none") Volatile.Write(ref errorCode, "unavailable"); }
+    }
+    public string GetErrorCode() {
+        if (Process.HasExited) drain.Wait(1000);
+        return Volatile.Read(ref errorCode);
+    }
+    public void Dispose() { Process.Dispose(); }
+}
+'@
+    }
+    return [CvsSshProcess]::Start($Executable,$Arguments)
+}
+
 function Start-CvsTunnel {
     [CmdletBinding()]
-    param()
-    $profile = Get-CvsConnectionProfile
-    $managedProcess = Get-CvsManagedTunnelProcess -Profile $profile
+    param([switch]$Persistent, $Policy=(Get-CvsTunnelPolicy), $Profile=(Get-CvsConnectionProfile), [switch]$VerifyModels)
+    $startup=[Diagnostics.Stopwatch]::StartNew()
+    $managedProcess = Get-CvsManagedTunnelProcess -Profile $profile -IncludeStarting
     if ($managedProcess) {
-        if (-not (Test-CvsGatewayModels -Port ([int]$profile.client.local_port))) { throw "Managed SSH tunnel is not healthy" }
+        # The supervisor must retain the reused handle even when it is stalled.
+        if (-not $Persistent) {
+            $ready=if($VerifyModels){Test-CvsGatewayModels -Port ([int]$profile.client.local_port)}else{Test-CvsGatewayHealth -Port ([int]$profile.client.local_port) -Profile $profile -TimeoutSec $Policy.HealthTimeoutSec}
+            if(-not $ready){throw 'gateway_timeout'}
+        }
         return [pscustomobject]@{Process=$null;ManagedProcess=$managedProcess;RuntimeDirectory=$null;Profile=$profile;Reused=$true}
     }
-    Test-CvsTailscaleReachability ([string]$profile.server.host)
-    Test-CvsLocalPortAvailable ([int]$profile.client.local_port)
+    if(@(Get-CvsPortListeners -Port ([int]$profile.client.local_port)).Count){throw 'unmanaged_listener'}
+    # A failed Tailscale ping cannot establish that the SSH service is unreachable.
+    try { Test-CvsLocalPortAvailable ([int]$profile.client.local_port) } catch {throw 'unmanaged_listener'}
     $deviceId = [string]$profile.approved_device.device_id
     $identity = Join-Path (Get-CvsKeyDirectory) $deviceId
     if (-not (Test-Path $identity) -or (Get-Item $identity -Force).LinkType) { throw "Device SSH identity is missing or unsafe" }
     $runtime = Join-Path ([System.IO.Path]::GetTempPath()) "codex-via-server-$([guid]::NewGuid().ToString('N'))"
     New-Item -ItemType Directory -Path $runtime | Out-Null
-    $process = $null
+    Set-CvsPrivateAcl $runtime
+    $process = $null; $diagnostics=$null
     try {
-        $knownHosts = Get-CvsVerifiedKnownHosts -Profile $profile -RuntimeDirectory $runtime
+        $remaining=[int][math]::Floor($Policy.StartupBudgetSec-$startup.Elapsed.TotalSeconds)
+        if($remaining -lt 1){throw 'ssh_auth_or_start_failed'}
+        $knownHosts = Get-CvsVerifiedKnownHosts -Profile $profile -RuntimeDirectory $runtime -TimeoutSec $remaining
         $ssh = Get-CvsExecutable "CODEX_VIA_SERVER_SSH" "ssh.exe"
         $arguments = New-CvsSshArguments -Profile $profile -Identity $identity -KnownHosts $knownHosts
-        $processArgumentLine = (@($arguments | ForEach-Object { ConvertTo-CvsWindowsProcessArgument ([string]$_) }) -join ' ')
-        $process = Start-Process -FilePath $ssh -ArgumentList $processArgumentLine -PassThru -WindowStyle Hidden
-        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        try {$diagnostics=Start-CvsSshProcess -Executable $ssh -Arguments $arguments; $process=$diagnostics.Process} catch {throw 'ssh_auth_or_start_failed'}
+        $tunnel=[pscustomobject]@{Process=$process;ManagedProcess=$null;Diagnostics=$diagnostics;RuntimeDirectory=$runtime;Profile=$profile;Reused=$false;StartupRemainingSec=[math]::Max(0,$Policy.StartupBudgetSec-$startup.Elapsed.TotalSeconds)}
+        if($Persistent){return $tunnel}
         do {
-            if ($process.HasExited) { throw "Restricted SSH tunnel exited during startup" }
-            try {
-                if (-not (Test-CvsGatewayModels -Port ([int]$profile.client.local_port))) { throw "Gateway models response is invalid" }
-                return [pscustomobject]@{Process=$process;RuntimeDirectory=$runtime;Profile=$profile;Reused=$false}
-            } catch { Start-Sleep -Milliseconds 200 }
-        } while ([DateTime]::UtcNow -lt $deadline)
-        throw "Gateway models check timed out"
+            if($VerifyModels -and (Test-CvsDesktopStopRequested)){throw 'gateway_timeout'}
+            if ($process.HasExited) { throw 'ssh_auth_or_start_failed' }
+            $remaining=[int][math]::Floor($Policy.StartupBudgetSec-$startup.Elapsed.TotalSeconds)
+            if($remaining -lt 1){break}
+            if($VerifyModels -and $remaining -lt 5){break}
+            $ready=if($VerifyModels){
+                $owner=Get-CvsManagedTunnelProcess -Profile $profile
+                $owner -and $owner.Id -eq $process.Id -and (Test-CvsGatewayModels -Port ([int]$profile.client.local_port) -TimeoutSec ([math]::Min(45,$remaining)))
+            }else{Test-CvsGatewayHealth -Port ([int]$profile.client.local_port) -Profile $profile -TimeoutSec ([math]::Min($Policy.HealthTimeoutSec,$remaining))}
+            if($ready){return $tunnel}
+            Start-Sleep -Milliseconds 200
+        } while ($startup.Elapsed.TotalSeconds -lt $Policy.StartupBudgetSec)
+        throw 'gateway_timeout'
     } catch {
-        if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force }
-        Remove-Item -LiteralPath $runtime -Recurse -Force -ErrorAction SilentlyContinue
+        if ($process -and -not $process.HasExited) { Stop-CvsManagedProcess -Profile $profile -Process $process | Out-Null }
+        if($diagnostics){$diagnostics.Dispose()}
+        Remove-CvsRuntimeDirectory -Path $runtime
         throw
     }
+}
+
+function Test-CvsTunnelHasClients {
+    param([Parameter(Mandatory)][int]$Port, [Parameter(Mandatory)][int]$OwnerProcessId)
+    try {
+        return (@(Get-NetTCPConnection -ErrorAction Stop | Where-Object {
+            $_.LocalAddress -eq '127.0.0.1' -and $_.LocalPort -eq $Port -and
+            $_.OwningProcess -eq $OwnerProcessId -and $_.State -eq 'Established'
+        }).Count -gt 0)
+    } catch { return $true }
+}
+
+function Test-CvsReplacementTunnel {
+    param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)]$Policy)
+    if(Test-CvsDesktopStopRequested){return $false}
+    $reservation=[Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback,0)
+    try {$reservation.Start();$port=$reservation.LocalEndpoint.Port} finally {$reservation.Stop()}
+    # Keep the approved destination and identity; only the temporary loopback port differs.
+    $probeProfile=$Profile | ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    $probeProfile.client.local_port=$port
+    $probePolicy=$Policy.PSObject.Copy()
+    $probePolicy.StartupBudgetSec=[math]::Max(45,$Policy.StartupBudgetSec)
+    $candidate=$null;$ready=$false
+    try {
+        $candidate=Start-CvsTunnel -Profile $probeProfile -Policy $probePolicy -VerifyModels
+        $ready=$true
+    } catch { $ready=$false }
+    finally {
+        if($candidate){try {Stop-CvsTunnel -Tunnel $candidate -IncludeReused} catch {$ready=$false}}
+    }
+    return $ready
 }
 
 function Test-CvsCodexConfiguration {
@@ -437,10 +672,238 @@ function Invoke-CvsOfficialCodex {
     return $LASTEXITCODE
 }
 
+function Stop-CvsManagedProcess {
+    param([Parameter(Mandatory)]$Profile, [Parameter(Mandatory)]$Process)
+    if ($Process.HasExited) { return $false }
+    $current = Get-Process -Id $Process.Id -ErrorAction SilentlyContinue
+    if (-not $current -or $current.HasExited) { return $false }
+    # Keep the Process object/handle, not just the PID; revalidate birth time and
+    # the approved command immediately before killing. PID reuse fails closed.
+    if ($current.StartTime.ToUniversalTime().Ticks -ne $Process.StartTime.ToUniversalTime().Ticks) { return $false }
+    $record=Get-CimInstance Win32_Process -Filter "ProcessId = $($Process.Id)" -ErrorAction SilentlyContinue
+    if (-not $record -or [IO.Path]::GetFileName([string]$record.ExecutablePath) -ine 'ssh.exe' -or
+        -not (Test-CvsManagedSshCommandLine -Profile $Profile -CommandLine ([string]$record.CommandLine))) { return $false }
+    $owners=@(Get-CvsPortListeners -Port ([int]$Profile.client.local_port))
+    if (@($owners | Where-Object OwningProcess -ne $Process.Id).Count) { return $false }
+    Stop-Process -InputObject $current -Force -ErrorAction Stop
+    return $true
+}
+
+function Remove-CvsRuntimeDirectory {
+    param([string]$Path)
+    if (-not $Path -or -not (Test-Path -LiteralPath $Path)) { return }
+    $resolved=[IO.Path]::GetFullPath($Path)
+    $temp=[IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd('\','/')
+    if ((Split-Path -Parent $resolved).TrimEnd('\','/') -ine $temp -or
+        (Split-Path -Leaf $resolved) -cnotmatch '^codex-via-server-[0-9a-f]{32}$' -or
+        (Get-Item -LiteralPath $resolved -Force).LinkType) { throw 'unsafe_runtime_directory' }
+    Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop
+}
+
 function Stop-CvsTunnel {
-    param([Parameter(Mandatory)]$Tunnel)
-    if ($Tunnel.Process -and -not $Tunnel.Process.HasExited) { Stop-Process -Id $Tunnel.Process.Id -Force }
-    if ($Tunnel.RuntimeDirectory -and (Test-Path $Tunnel.RuntimeDirectory)) { Remove-Item -LiteralPath $Tunnel.RuntimeDirectory -Recurse -Force }
+    param([Parameter(Mandatory)]$Tunnel, [switch]$IncludeReused)
+    $process = $Tunnel.Process
+    if (-not $process -and $IncludeReused -and $Tunnel.PSObject.Properties['ManagedProcess']) { $process=$Tunnel.ManagedProcess }
+    if ($process -and -not $process.HasExited) {
+        $stopped=Stop-CvsManagedProcess -Profile $Tunnel.Profile -Process $process
+        if(-not $stopped -and -not $process.HasExited){throw 'unmanaged_listener'}
+    }
+    if($Tunnel.RuntimeDirectory){Remove-CvsRuntimeDirectory -Path $Tunnel.RuntimeDirectory}
+    if($Tunnel.PSObject.Properties['Diagnostics'] -and $Tunnel.Diagnostics){$Tunnel.Diagnostics.Dispose()}
+}
+
+function Get-CvsUtcNow { return [DateTimeOffset]::UtcNow }
+
+function Test-CvsDesktopStopRequested {
+    return Test-Path -LiteralPath (Join-Path (Get-CvsStateDirectory) 'desktop-stopped')
+}
+
+function Wait-CvsMonitorDelay {
+    param([double]$Seconds, $Process=$null)
+    $timer=[Diagnostics.Stopwatch]::StartNew()
+    do {
+        if(Test-CvsDesktopStopRequested){return $false}
+        if($Process -and $Process.HasExited){return $true}
+        if($timer.Elapsed.TotalSeconds -ge $Seconds){return $true}
+        Start-Sleep -Milliseconds ([math]::Min(1000,[math]::Max(1,($Seconds-$timer.Elapsed.TotalSeconds)*1000)))
+    } while($true)
+}
+
+function Wait-CvsLocalPortReleased {
+    param([int]$Port, [int]$TimeoutSec=10)
+    $timer=[Diagnostics.Stopwatch]::StartNew()
+    do {
+        if(-not @(Get-CvsPortListeners -Port $Port).Count){return $true}
+        if($timer.Elapsed.TotalSeconds -ge $TimeoutSec){return $false}
+        Start-Sleep -Milliseconds 200
+    } while($true)
+}
+
+function Write-CvsTunnelEvent {
+    param(
+        [ValidateSet('Starting','Healthy','Suspect','Recovering','Backoff','Stopped')][string]$State,
+        [ValidateSet('starting','healthy','recovered','gateway_timeout','gateway_bad_status','gateway_connection_failed',
+            'managed_process_exited','managed_listener_missing','transport_stalled','unmanaged_listener','restart_backoff','tailscale_unreachable','health_probe_busy',
+            'ssh_host_key_unavailable','ssh_auth_or_start_failed','invalid_runtime_policy','gateway_responsive',
+            'recovery_deferred','replacement_unavailable','replacement_verified','stopped')][string]$Code,
+        [long]$DurationMs=0, [int]$Failures=0, $LastSuccess=$null, [int]$ReconnectAttempt=0,
+        [Nullable[int]]$ExitCode=$null, [Nullable[int]]$ProcessId=$null, [bool]$Reconnected=$false,
+        [ValidateSet('unavailable','none','unclassified','server_not_responding','connection_reset','connection_refused','connection_timeout','connection_closed','host_key_rejected','authentication_failed')][string]$SshError='unavailable',
+        [ValidateRange(0,599)][int]$HttpStatus=0, [int]$BackoffSec=0,
+        [ValidateSet('none','managed_process_exited','transport_stalled','unmanaged_listener','tailscale_unreachable','ssh_host_key_unavailable','ssh_auth_or_start_failed','gateway_timeout')][string]$Reason='none'
+    )
+    $stateDirectory=Get-CvsStateDirectory
+    New-Item -ItemType Directory -Force -Path $stateDirectory | Out-Null
+    Set-CvsPrivateAcl $stateDirectory
+    $now=Get-CvsUtcNow
+    if($null -ne $LastSuccess){$script:LastTunnelSuccess=$LastSuccess}else{$LastSuccess=$script:LastTunnelSuccess}
+    $entry=[ordered]@{TimestampUtc=$now.ToUniversalTime().ToString('o');TimestampLocal=$now.ToLocalTime().ToString('o')
+        State=$State;Code=$Code;DurationMs=$DurationMs;ConsecutiveFailures=$Failures
+        LastSuccessUtc=if($null -ne $LastSuccess){$LastSuccess.ToUniversalTime().ToString('o')}else{$null}
+        ReconnectAttempt=$ReconnectAttempt;Reconnected=$Reconnected;RecoveryReason=$Reason;SshExitCode=$ExitCode;SshError=$SshError;ProcessId=$ProcessId;HttpStatus=$HttpStatus;BackoffSec=$BackoffSec}
+    $json=$entry | ConvertTo-Json -Compress
+    $logPath=Join-Path $stateDirectory 'persistent-tunnel.log'
+    if((Test-Path -LiteralPath $logPath) -and (Get-Item -LiteralPath $logPath).Length -gt 1MB){
+        Move-Item -LiteralPath $logPath -Destination "${logPath}.1" -Force
+    }
+    Add-Content -LiteralPath $logPath -Value $json -Encoding utf8NoBOM
+    Set-CvsPrivateAcl $logPath
+    $temporary=Join-Path $stateDirectory 'tunnel-status.json.tmp'
+    Set-Content -LiteralPath $temporary -Value $json -Encoding utf8NoBOM
+    Set-CvsPrivateAcl $temporary
+    Move-Item -LiteralPath $temporary -Destination (Join-Path $stateDirectory 'tunnel-status.json') -Force
+}
+
+function Invoke-CvsTunnelMonitor {
+    param([Parameter(Mandatory)]$Tunnel, [Parameter(Mandatory)]$Policy, [int]$ReconnectAttempt=0, $LastRecovery=$null, [hashtable]$RecoveryContext=@{})
+    $process=if($Tunnel.Reused){$Tunnel.ManagedProcess}else{$Tunnel.Process}
+    # Keep an open handle so reused processes retain their exit code after termination.
+    if($process -is [Diagnostics.Process]){$null=$process.Handle}
+    $started=Get-CvsUtcNow; $lastSuccess=$null; $firstFailure=$null; $failures=0; $wasHealthy=[bool]$Tunnel.Reused
+    $announcedRecovery=$false; $lastRecoveryCheck=$null
+    $startupBudget=if($Tunnel.PSObject.Properties['StartupRemainingSec']){$Tunnel.StartupRemainingSec}else{$Policy.StartupBudgetSec}
+    while(-not (Test-CvsDesktopStopRequested)) {
+        if($process.HasExited){
+            $sshError=if($Tunnel.PSObject.Properties['Diagnostics'] -and $Tunnel.Diagnostics){$Tunnel.Diagnostics.GetErrorCode()}else{'unavailable'}
+            Write-CvsTunnelEvent -State Recovering -Code managed_process_exited -ExitCode $process.ExitCode -ProcessId $process.Id -SshError $sshError -ReconnectAttempt $ReconnectAttempt
+            return 'managed_process_exited'
+        }
+        $probeStart=Get-CvsUtcNow
+        $timeout=$Policy.HealthTimeoutSec
+        if(-not $wasHealthy){
+            $remaining=[int][math]::Floor($startupBudget-($probeStart-$started).TotalSeconds)
+            if($remaining -lt 1){return 'gateway_timeout'}
+            $timeout=[math]::Min($timeout,$remaining)
+        }
+        $probe=Test-CvsGatewayHealth -Profile $Tunnel.Profile -Port ([int]$Tunnel.Profile.client.local_port) -TimeoutSec $timeout -Detailed
+        $now=Get-CvsUtcNow
+        if($probe.Code -eq 'health_probe_busy'){
+            if(-not (Wait-CvsMonitorDelay -Seconds 1 -Process $process)){return 'stopped'}
+            continue
+        }
+        if($probe.Success){
+            $failures=0; $firstFailure=$null; $lastSuccess=$now; $wasHealthy=$true
+            $RecoveryContext.HadHealthyProbe=$true
+            $code=if($ReconnectAttempt -gt 0 -and -not $announcedRecovery){'recovered'}else{'healthy'}
+            $recoveryReason=if($code -eq 'recovered' -and $RecoveryContext.ContainsKey('Reason')){$RecoveryContext.Reason}else{'none'}
+            Write-CvsTunnelEvent -State Healthy -Code $code -DurationMs $probe.DurationMs -Failures 0 -LastSuccess $lastSuccess -ReconnectAttempt $ReconnectAttempt -ProcessId $process.Id -HttpStatus $probe.HttpStatus -Reconnected:($code -eq 'recovered') -Reason $recoveryReason
+            if($code -eq 'recovered'){$LastRecovery=$now;$RecoveryContext.LastRecovery=$now;$announcedRecovery=$true}
+        } else {
+            $failures++
+            if($null -eq $firstFailure){$firstFailure=$probeStart}
+            Write-CvsTunnelEvent -State Suspect -Code $probe.Code -DurationMs $probe.DurationMs -Failures $failures -LastSuccess $lastSuccess -ReconnectAttempt $ReconnectAttempt -ProcessId $process.Id -HttpStatus $probe.HttpStatus
+            if($probe.Code -eq 'unmanaged_listener'){return 'unmanaged_listener'}
+            if(-not $wasHealthy -and ($now-$started).TotalSeconds -ge $startupBudget){return 'gateway_timeout'}
+            $grace=[math]::Max($Policy.MinUnhealthyDurationSec,$Policy.ActiveSessionGraceSec)
+            $cooldownPassed=($null -eq $LastRecovery -or ($now-$LastRecovery).TotalSeconds -ge $Policy.RestartCooldownSec)
+            $cooldownPassed=$cooldownPassed -and ($null -eq $lastRecoveryCheck -or ($now-$lastRecoveryCheck).TotalSeconds -ge $Policy.RestartCooldownSec)
+            if($wasHealthy -and $failures -ge $Policy.ConsecutiveFailureThreshold -and ($now-$firstFailure).TotalSeconds -ge $grace -and $cooldownPassed){
+                if(Test-CvsGatewayModels -Port ([int]$Tunnel.Profile.client.local_port) -TimeoutSec ([math]::Max(45,$Policy.HealthTimeoutSec))){
+                    $failures=0; $firstFailure=$null; $lastSuccess=Get-CvsUtcNow
+                    Write-CvsTunnelEvent -State Suspect -Code gateway_responsive -LastSuccess $lastSuccess -ReconnectAttempt $ReconnectAttempt -ProcessId $process.Id
+                } else {
+                    $lastRecoveryCheck=Get-CvsUtcNow
+                    # Established includes idle pooled sockets; conservatively wait for clients to drain.
+                    if(Test-CvsTunnelHasClients -Port ([int]$Tunnel.Profile.client.local_port) -OwnerProcessId $process.Id){
+                        Write-CvsTunnelEvent -State Suspect -Code recovery_deferred -Failures $failures -ReconnectAttempt $ReconnectAttempt -ProcessId $process.Id
+                    } elseif(-not (Test-CvsReplacementTunnel -Profile $Tunnel.Profile -Policy $Policy)){
+                        Write-CvsTunnelEvent -State Suspect -Code replacement_unavailable -Failures $failures -ReconnectAttempt $ReconnectAttempt -ProcessId $process.Id
+                    } elseif(-not (Test-CvsDesktopStopRequested)) {
+                        if(Test-CvsTunnelHasClients -Port ([int]$Tunnel.Profile.client.local_port) -OwnerProcessId $process.Id){
+                            Write-CvsTunnelEvent -State Suspect -Code recovery_deferred -Failures $failures -ReconnectAttempt $ReconnectAttempt -ProcessId $process.Id
+                        } else {
+                            Write-CvsTunnelEvent -State Recovering -Code replacement_verified -ReconnectAttempt $ReconnectAttempt -ProcessId $process.Id
+                            Write-CvsTunnelEvent -State Recovering -Code transport_stalled -Failures $failures -LastSuccess $lastSuccess -ReconnectAttempt $ReconnectAttempt -ProcessId $process.Id
+                            return 'transport_stalled'
+                        }
+                    }
+                    $lastRecoveryCheck=Get-CvsUtcNow
+                }
+            }
+        }
+        if(Test-CvsDesktopStopRequested){return 'stopped'}
+        $delay=$Policy.HealthIntervalSec
+        if(-not $wasHealthy){$delay=[math]::Min(1,[math]::Max(0,$startupBudget-($now-$started).TotalSeconds))}
+        if(-not (Wait-CvsMonitorDelay -Seconds $delay -Process $process)){return 'stopped'}
+    }
+    return 'stopped'
+}
+
+function Invoke-CvsPersistentTunnel {
+    [CmdletBinding()]
+    param([switch]$StartRequested)
+    $stateDirectory=Get-CvsStateDirectory
+    New-Item -ItemType Directory -Force -Path $stateDirectory | Out-Null
+    Set-CvsPrivateAcl $stateDirectory
+    try { $lock=[IO.File]::Open((Join-Path $stateDirectory 'persistent-tunnel.lock'),[IO.FileMode]::OpenOrCreate,[IO.FileAccess]::ReadWrite,[IO.FileShare]::None) }
+    catch [IO.IOException] {return}
+    $tunnel=$null; $attempt=0; $failureStreak=0; $script:LastTunnelSuccess=$null
+    $recovery=@{LastRecovery=$null;HadHealthyProbe=$false;Reason='none'}
+    try {
+        # A new task activation resumes service; duplicates must not clear a stop request.
+        $stopPath=Join-Path $stateDirectory 'desktop-stopped'
+        if($StartRequested -and (Test-Path -LiteralPath $stopPath)){Remove-Item -LiteralPath $stopPath -Force}
+        try {$policy=Get-CvsTunnelPolicy} catch {
+            Write-CvsTunnelEvent -State Backoff -Code invalid_runtime_policy
+            throw 'invalid_runtime_policy'
+        }
+        $policyPath=Join-Path (Get-CvsConfigDirectory) 'runtime-policy.json'
+        if(Test-Path -LiteralPath $policyPath){Set-CvsPrivateAcl $policyPath}
+        while(-not (Test-CvsDesktopStopRequested)) {
+            $reason='ssh_auth_or_start_failed'
+            $recovery.HadHealthyProbe=$false
+            Write-CvsTunnelEvent -State Starting -Code starting -ReconnectAttempt $attempt
+            try {
+                $tunnel=Start-CvsTunnel -Persistent -Policy $policy
+                $reason=Invoke-CvsTunnelMonitor -Tunnel $tunnel -Policy $policy -ReconnectAttempt $attempt -LastRecovery $recovery.LastRecovery -RecoveryContext $recovery
+            } catch {
+                # Fixed codes only; never log exception messages, commands or HTTP bodies.
+                if($_.Exception.Message -in @('tailscale_unreachable','ssh_host_key_unavailable','ssh_auth_or_start_failed','gateway_timeout','unmanaged_listener')){$reason=$_.Exception.Message}
+                Write-CvsTunnelEvent -State Recovering -Code $reason -ReconnectAttempt $attempt
+            } finally {
+                if($tunnel){
+                    try {Stop-CvsTunnel -Tunnel $tunnel -IncludeReused} catch {$reason='unmanaged_listener'}
+                    if($reason -ne 'stopped' -and -not (Test-CvsDesktopStopRequested)){
+                        if(-not (Wait-CvsLocalPortReleased -Port ([int]$tunnel.Profile.client.local_port) -TimeoutSec $policy.PortReleaseTimeoutSec)){$reason='unmanaged_listener'}
+                    }
+                    $tunnel=$null
+                }
+            }
+            if($reason -eq 'stopped' -or (Test-CvsDesktopStopRequested)){break}
+            $attempt++
+            if($recovery.HadHealthyProbe){$failureStreak=0}
+            $failureStreak++
+            $recovery.Reason=$reason
+            $delay=$policy.ReconnectBackoffSec[[math]::Min($failureStreak-1,$policy.ReconnectBackoffSec.Count-1)]
+            # The monitor enforces cooldown for established channels. Backoff
+            # also caps creation rate when no usable tunnel can be established.
+            Write-CvsTunnelEvent -State Backoff -Code restart_backoff -Reason $reason -ReconnectAttempt $attempt -BackoffSec $delay
+            if(-not (Wait-CvsMonitorDelay -Seconds $delay)){break}
+        }
+    } finally {
+        if(Test-CvsDesktopStopRequested){Write-CvsTunnelEvent -State Stopped -Code stopped -ReconnectAttempt $attempt}
+        $lock.Dispose()
+    }
 }
 
 function Test-CvsDoctor {
@@ -587,6 +1050,14 @@ function Get-CvsCurrentUserId {
     return [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
 }
 
+function Get-CvsDesktopTaskName {
+    $root = [IO.Path]::GetFullPath((Get-CvsRoot)).TrimEnd([IO.Path]::DirectorySeparatorChar).ToLowerInvariant()
+    $defaultRoot = [IO.Path]::GetFullPath((Join-Path $HOME '.codex-via-server')).ToLowerInvariant()
+    if ($root -eq $defaultRoot) { return 'CodexViaServer Persistent Tunnel' }
+    $hash = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($root)))
+    return 'CodexViaServer Persistent Tunnel ' + $hash.Substring(0, 12)
+}
+
 function Register-CvsDesktopTask {
     $installRoot = Get-CvsInstallRoot
     $tunnelScript = Join-Path $installRoot "persistent-tunnel.ps1"
@@ -595,27 +1066,37 @@ function Register-CvsDesktopTask {
     }
     $pwsh = Get-CvsExecutable "CODEX_VIA_SERVER_PWSH" "pwsh.exe"
     $userId = Get-CvsCurrentUserId
-    $actionArguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}"' -f $tunnelScript.Replace('"', '""')
+    $paths = @($tunnelScript, (Get-CvsRoot), (Get-CvsCodexHome), (Get-CvsKeyDirectory))
+    foreach ($path in $paths) {
+        if (-not [IO.Path]::IsPathFullyQualified($path) -or $path -match '["\r\n]' -or $path.EndsWith('\')) { throw 'unsafe_task_path' }
+    }
+    $actionArguments = '-NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "{0}" -ClientHome "{1}" -CodexHome "{2}" -KeyDirectory "{3}"' -f $paths
     $action = New-ScheduledTaskAction -Execute $pwsh -Argument $actionArguments -WorkingDirectory $installRoot
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
     $settings = New-ScheduledTaskSettingsSet -Hidden -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit ([TimeSpan]::Zero) -MultipleInstances IgnoreNew -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
     $principal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
     $task = New-ScheduledTask -Action $action -Trigger $trigger -Settings $settings -Principal $principal
-    Register-ScheduledTask -TaskName $script:DesktopTaskName -InputObject $task -Force | Out-Null
+    Register-ScheduledTask -TaskName (Get-CvsDesktopTaskName) -InputObject $task -Force | Out-Null
 }
 
 function Remove-CvsDesktopTask {
-    $task = Get-ScheduledTask -TaskName $script:DesktopTaskName -ErrorAction SilentlyContinue
+    $task = Get-ScheduledTask -TaskName (Get-CvsDesktopTaskName) -ErrorAction SilentlyContinue
     if (-not $task) { return }
-    Stop-ScheduledTask -TaskName $script:DesktopTaskName -ErrorAction SilentlyContinue
-    Unregister-ScheduledTask -TaskName $script:DesktopTaskName -Confirm:$false
+    Stop-ScheduledTask -TaskName (Get-CvsDesktopTaskName) -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName (Get-CvsDesktopTaskName) -Confirm:$false
 }
 
 function Wait-CvsDesktopGateway {
-    param([Parameter(Mandatory)][int]$Port, [int]$Attempts = 15)
-    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+    param([Parameter(Mandatory)][int]$Port)
+    $policy=Get-CvsTunnelPolicy; $timer=[Diagnostics.Stopwatch]::StartNew()
+    # Include one automatic retry and its backoff, bounded for interactive callers.
+    $waitBudget=[math]::Min(120,2*$policy.StartupBudgetSec+$policy.ReconnectBackoffSec[0])
+    while($timer.Elapsed.TotalSeconds -lt $waitBudget) {
+        if(Test-CvsDesktopStopRequested){return $false}
         $managed = Get-CvsManagedTunnelProcess
-        if ($managed -and (Test-CvsGatewayModels -Port $Port)) { return $true }
+        $remaining=[int][math]::Floor($waitBudget-$timer.Elapsed.TotalSeconds)
+        if($remaining -lt 1){break}
+        if ($managed -and (Test-CvsGatewayHealth -Port $Port -TimeoutSec ([math]::Min($policy.HealthTimeoutSec,$remaining)))) { return $true }
         Start-Sleep -Seconds 1
     }
     return $false
@@ -625,10 +1106,9 @@ function Stop-CvsDesktopRuntime {
     [CmdletBinding()]
     param()
     $profile = Get-CvsConnectionProfile
-    $process = Get-CvsManagedTunnelProcess -Profile $profile
+    $process = Get-CvsManagedTunnelProcess -Profile $profile -IncludeStarting
     if ($process -and -not $process.HasExited) {
-        Stop-Process -Id $process.Id -Force
-        return $true
+        return Stop-CvsManagedProcess -Profile $profile -Process $process
     }
     return $false
 }
@@ -643,9 +1123,11 @@ function Install-CvsDesktop {
     try {
         Set-CvsDesktopCodexConfig -Profile $profile | Out-Null
         Register-CvsDesktopTask
-        Start-ScheduledTask -TaskName $script:DesktopTaskName
+        $stopPath=Join-Path (Get-CvsStateDirectory) 'desktop-stopped'
+        if(Test-Path -LiteralPath $stopPath){Remove-Item -LiteralPath $stopPath -Force}
+        Start-ScheduledTask -TaskName (Get-CvsDesktopTaskName)
         if (-not (Wait-CvsDesktopGateway -Port ([int]$profile.client.local_port))) { throw "Persistent tunnel health check failed" }
-        return [pscustomobject]@{Status="pass";TaskName=$script:DesktopTaskName;Url="http://127.0.0.1:$($profile.client.local_port)/v1"}
+        return [pscustomobject]@{Status="pass";TaskName=(Get-CvsDesktopTaskName);Url="http://127.0.0.1:$($profile.client.local_port)/v1"}
     } catch {
         Remove-CvsDesktopTask
         try { Stop-CvsDesktopRuntime | Out-Null } catch {}
@@ -656,49 +1138,114 @@ function Install-CvsDesktop {
 
 function Get-CvsDesktopStatus {
     [CmdletBinding()]
-    param()
+    param([switch]$CheckAPI)
     $profile = Get-CvsConnectionProfile
-    $task = Get-ScheduledTask -TaskName $script:DesktopTaskName -ErrorAction SilentlyContinue
+    $task = Get-ScheduledTask -TaskName (Get-CvsDesktopTaskName) -ErrorAction SilentlyContinue
     if (-not $task) { throw "Persistent tunnel task is not installed" }
     $process = Get-CvsManagedTunnelProcess -Profile $profile
-    if (-not $process) { throw "Managed SSH tunnel is not running" }
-    if (-not (Test-CvsGatewayModels -Port ([int]$profile.client.local_port))) { throw "Persistent tunnel endpoint is unavailable" }
-    return [pscustomobject]@{Status="pass";TaskName=$script:DesktopTaskName;TaskState=[string]$task.State;ProcessId=$process.Id;Url="http://127.0.0.1:$($profile.client.local_port)/v1"}
+    $policy=Get-CvsTunnelPolicy
+    $health=Test-CvsGatewayHealth -Profile $profile -Port ([int]$profile.client.local_port) -TimeoutSec $policy.HealthTimeoutSec -Detailed
+    $stopped=Test-CvsDesktopStopRequested
+    $snapshot=$null; $statePath=Join-Path (Get-CvsStateDirectory) 'tunnel-status.json'
+    if(Test-Path -LiteralPath $statePath){try{$snapshot=Get-Content -LiteralPath $statePath -Raw | ConvertFrom-Json}catch{}}
+    $healthSource='live'
+    if($health.Code -eq 'health_probe_busy'){
+        $healthSource='probe_in_progress'
+        # A serialized probe is not a failed probe. Reuse only a recent, healthy
+        # supervisor observation for this exact live process, never a stale PID.
+        try {
+            $last=[DateTimeOffset]$snapshot.LastSuccessUtc
+            $age=((Get-CvsUtcNow)-$last).TotalSeconds
+            if($process -and $snapshot.State -eq 'Healthy' -and $snapshot.ProcessId -eq $process.Id -and
+                $last.UtcDateTime -ge $process.StartTime.ToUniversalTime() -and
+                $age -ge 0 -and $age -le ($policy.HealthTimeoutSec+$policy.HealthIntervalSec+2)){
+                $health=[pscustomobject]@{Success=$true;Code='healthy';DurationMs=$snapshot.DurationMs}
+                $healthSource='recent_supervisor_probe'
+            }
+        } catch { # Missing, malformed or stale state is never a healthy cache.
+        }
+    }
+    $upstream='not_checked'
+    if($CheckAPI -and $health.Success){$upstream=if(Test-CvsGatewayModels -Port ([int]$profile.client.local_port)){'models_available'}else{'models_unavailable'}}
+    return [pscustomobject]@{
+        Status=if($stopped){'stopped'}elseif($health.Success){'pass'}elseif($health.Code -eq 'health_probe_busy'){'checking'}else{'degraded'}
+        TaskName=(Get-CvsDesktopTaskName);TaskState=[string]$task.State
+        ProcessId=if($process){$process.Id}else{$null};Url="http://127.0.0.1:$($profile.client.local_port)/v1"
+        TunnelHealth=if($health.Success){'healthy'}else{$health.Code};UpstreamAPI=$upstream
+        DurationMs=$health.DurationMs;HealthSource=$healthSource;MonitorState=if($stopped){'Stopped'}elseif($snapshot){$snapshot.State}else{'unknown'}
+        LastSuccessUtc=if($snapshot){$snapshot.LastSuccessUtc}else{$null}
+    }
+}
+
+function Start-CvsDesktopCore {
+    $profile = Get-CvsConnectionProfile
+    $task=Get-ScheduledTask -TaskName (Get-CvsDesktopTaskName) -ErrorAction SilentlyContinue
+    if (-not $task) { throw 'Persistent tunnel task is not installed' }
+    $stopPath=Join-Path (Get-CvsStateDirectory) 'desktop-stopped'
+    if(Test-Path -LiteralPath $stopPath){Remove-Item -LiteralPath $stopPath -Force}
+    if([string]$task.State -ne 'Running'){Start-ScheduledTask -TaskName (Get-CvsDesktopTaskName)}
+    if (-not (Wait-CvsDesktopGateway -Port ([int]$profile.client.local_port))) { throw 'desktop_start_unavailable: check desktop-status and persistent-tunnel.log; supervisor recovery remains enabled' }
+    return [pscustomobject]@{Status='pass';TaskName=(Get-CvsDesktopTaskName);TunnelHealth='healthy';UpstreamAPI='not_checked';Url="http://127.0.0.1:$($profile.client.local_port)/v1"}
+}
+
+function Stop-CvsDesktopCore {
+    if (-not (Get-ScheduledTask -TaskName (Get-CvsDesktopTaskName) -ErrorAction SilentlyContinue)) { throw "Persistent tunnel task is not installed" }
+    $stateDirectory=Get-CvsStateDirectory
+    New-Item -ItemType Directory -Force -Path $stateDirectory | Out-Null; Set-CvsPrivateAcl $stateDirectory
+    $stopPath=Join-Path $stateDirectory 'desktop-stopped'
+    Set-Content -LiteralPath $stopPath -Value 'stopped' -Encoding utf8NoBOM; Set-CvsPrivateAcl $stopPath
+    Stop-ScheduledTask -TaskName (Get-CvsDesktopTaskName) -ErrorAction Stop
+    $deadline=[Diagnostics.Stopwatch]::StartNew()
+    while([string](Get-ScheduledTask -TaskName (Get-CvsDesktopTaskName)).State -eq 'Running'){
+        if($deadline.Elapsed.TotalSeconds -gt 10){throw 'desktop_stop_task_timeout'}
+        Start-Sleep -Milliseconds 200
+    }
+    $runtimeStopped = Stop-CvsDesktopRuntime
+    $profile=Get-CvsConnectionProfile
+    if(-not (Wait-CvsLocalPortReleased -Port ([int]$profile.client.local_port))){throw 'unmanaged_listener'}
+    Write-CvsTunnelEvent -State Stopped -Code stopped
+    return [pscustomobject]@{Status="stopped";TaskName=(Get-CvsDesktopTaskName);RuntimeStopped=[bool]$runtimeStopped}
+}
+
+function Invoke-CvsDesktopControl {
+    param([Parameter(Mandatory)][scriptblock]$Action)
+    $mutex=New-CvsMutex -Kind Control; $locked=$false
+    try {
+        try {$locked=$mutex.WaitOne(10000)} catch [Threading.AbandonedMutexException] {$locked=$true}
+        if(-not $locked){throw 'desktop_control_busy'}
+        & $Action
+    } finally {if($locked){$mutex.ReleaseMutex()};$mutex.Dispose()}
 }
 
 function Start-CvsDesktop {
-    [CmdletBinding()]
-    param()
-    $profile = Get-CvsConnectionProfile
-    if (-not (Get-ScheduledTask -TaskName $script:DesktopTaskName -ErrorAction SilentlyContinue)) { throw "Persistent tunnel task is not installed" }
-    Start-ScheduledTask -TaskName $script:DesktopTaskName
-    if (-not (Wait-CvsDesktopGateway -Port ([int]$profile.client.local_port))) { throw "Persistent tunnel start failed" }
-    return [pscustomobject]@{Status="pass";TaskName=$script:DesktopTaskName;Url="http://127.0.0.1:$($profile.client.local_port)/v1"}
+    [CmdletBinding()]param()
+    Invoke-CvsDesktopControl {Start-CvsDesktopCore}
 }
 
 function Stop-CvsDesktop {
-    [CmdletBinding()]
-    param()
-    if (-not (Get-ScheduledTask -TaskName $script:DesktopTaskName -ErrorAction SilentlyContinue)) { throw "Persistent tunnel task is not installed" }
-    Stop-ScheduledTask -TaskName $script:DesktopTaskName -ErrorAction SilentlyContinue
-    $runtimeStopped = Stop-CvsDesktopRuntime
-    return [pscustomobject]@{Status="stopped";TaskName=$script:DesktopTaskName;RuntimeStopped=[bool]$runtimeStopped}
+    [CmdletBinding()]param()
+    Invoke-CvsDesktopControl {Stop-CvsDesktopCore}
 }
 
 function Restart-CvsDesktop {
     [CmdletBinding()]
     param()
-    Stop-CvsDesktop | Out-Null
-    return Start-CvsDesktop
+    Invoke-CvsDesktopControl {Stop-CvsDesktopCore | Out-Null; Start-CvsDesktopCore}
 }
 
 function Uninstall-CvsDesktop {
     [CmdletBinding()]
     param()
-    Remove-CvsDesktopTask
-    try { Stop-CvsDesktopRuntime | Out-Null } catch [System.Management.Automation.ItemNotFoundException] {}
-    Restore-CvsDesktopCodexConfig
-    return [pscustomobject]@{Status="uninstalled";TaskName=$script:DesktopTaskName;ConfigRestored=$true}
+    Invoke-CvsDesktopControl {
+        if(Get-ScheduledTask -TaskName (Get-CvsDesktopTaskName) -ErrorAction SilentlyContinue){
+            Stop-CvsDesktopCore | Out-Null
+        } else {
+            try { Stop-CvsDesktopRuntime | Out-Null } catch [System.Management.Automation.ItemNotFoundException] {}
+        }
+        Remove-CvsDesktopTask
+        Restore-CvsDesktopCodexConfig
+        [pscustomobject]@{Status="uninstalled";TaskName=(Get-CvsDesktopTaskName);ConfigRestored=$true}
+    }
 }
 
 function Get-CvsInstallRoot {
@@ -806,4 +1353,4 @@ function Uninstall-CvsClient {
     return [pscustomobject]@{Status="uninstalled";Backup=$backup;DeviceKeyRemoved=[bool]$RemoveDeviceKey}
 }
 
-Export-ModuleMember -Function Initialize-CvsDevice, Import-CvsConnectionProfile, Test-CvsVersionAtLeast, Set-CvsPrivateAcl, Start-CvsTunnel, Stop-CvsTunnel, Test-CvsGatewayModels, Test-CvsDoctor, Invoke-CvsCodex, Install-CvsDesktop, Start-CvsDesktop, Get-CvsDesktopStatus, Restart-CvsDesktop, Stop-CvsDesktop, Uninstall-CvsDesktop, Stop-CvsDesktopRuntime, Update-CvsClient, Uninstall-CvsClient
+Export-ModuleMember -Function Initialize-CvsDevice, Import-CvsConnectionProfile, Test-CvsVersionAtLeast, Set-CvsPrivateAcl, Start-CvsTunnel, Stop-CvsTunnel, Test-CvsGatewayModels, Test-CvsGatewayHealth, Get-CvsTunnelPolicy, Invoke-CvsPersistentTunnel, Test-CvsDoctor, Invoke-CvsCodex, Install-CvsDesktop, Start-CvsDesktop, Get-CvsDesktopStatus, Get-CvsDesktopTaskName, Restart-CvsDesktop, Stop-CvsDesktop, Uninstall-CvsDesktop, Stop-CvsDesktopRuntime, Update-CvsClient, Uninstall-CvsClient

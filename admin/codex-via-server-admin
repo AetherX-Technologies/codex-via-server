@@ -43,7 +43,11 @@ for dependency in jq ssh ssh-keygen ssh-keyscan; do
 done
 
 [[ -f "$CONFIG_FILE" && ! -L "$CONFIG_FILE" ]] || fail "admin configuration is missing or unsafe: $CONFIG_FILE"
-config_mode="$(stat -f '%Lp' "$CONFIG_FILE" 2>/dev/null || stat -c '%a' "$CONFIG_FILE")"
+if stat -f '%Lp' "$CONFIG_FILE" >/dev/null 2>&1; then
+  config_mode="$(stat -f '%Lp' "$CONFIG_FILE")"
+else
+  config_mode="$(stat -c '%a' "$CONFIG_FILE")"
+fi
 [[ "$config_mode" == "600" ]] || fail "admin configuration mode must be 0600"
 
 jq -e '
@@ -56,7 +60,7 @@ jq -e '
   (.admin.port | type == "number") and
   (.admin.user | type == "string") and
   (.admin.identity | type == "string") and
-  (.admin.host_fingerprints | type == "array" and length > 0) and
+  (.admin.host_fingerprints | type == "array" and length > 0 and length <= 4 and all(.[]; type == "string" and test("^SHA256:[A-Za-z0-9+/]{43}$"))) and
   (.tunnel | type == "object") and
   (.tunnel.host | type == "string") and
   (.tunnel.port | type == "number") and
@@ -91,6 +95,8 @@ HOST_PATTERN='^(100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1
 [[ "$ADMIN_USER" =~ ^[A-Za-z0-9._-]+$ ]] || fail "invalid admin user"
 [[ "$ADMIN_PORT" =~ ^[0-9]+$ && "$ADMIN_PORT" -ge 1 && "$ADMIN_PORT" -le 65535 ]] || fail "invalid admin port"
 [[ "$TUNNEL_PORT" =~ ^[0-9]+$ && "$TUNNEL_PORT" -ge 1 && "$TUNNEL_PORT" -le 65535 ]] || fail "invalid tunnel port"
+# Both endpoints use the same pinned host keys in the exported profile.
+[[ "$ADMIN_HOST" == "$TUNNEL_HOST" && "$ADMIN_PORT" == "$TUNNEL_PORT" ]] || fail "admin and tunnel SSH endpoints must match"
 [[ "$GATEWAY_REMOTE_PORT" =~ ^[0-9]+$ && "$GATEWAY_REMOTE_PORT" -ge 1024 && "$GATEWAY_REMOTE_PORT" -le 65535 ]] || fail "invalid gateway port"
 [[ "$LOCAL_PORT" =~ ^[0-9]+$ && "$LOCAL_PORT" -ge 1024 && "$LOCAL_PORT" -le 65535 ]] || fail "invalid local port"
 [[ "$PROFILE_ID" =~ ^[a-z0-9][a-z0-9._-]{1,62}[a-z0-9]$ ]] || fail "invalid profile id"
@@ -133,11 +139,16 @@ SSH_COMMAND=(
   -o UpdateHostKeys=no
   -o ProxyCommand=none
   -o ProxyJump=none
+  -o PermitLocalCommand=no
+  -o ClearAllForwardings=yes
   -o ConnectTimeout=8
   -o ConnectionAttempts=1
   -o LogLevel=ERROR
+  -T
 )
 SSH_TARGET="${ADMIN_USER}@${ADMIN_HOST}"
+DEVICE_COMMAND=("$SERVER_DEVICE_TOOL")
+if [[ "$ADMIN_USER" != "root" ]]; then DEVICE_COMMAND=(sudo -n "$SERVER_DEVICE_TOOL"); fi
 
 command_name="${1:-}"
 case "$command_name" in
@@ -148,21 +159,47 @@ case "$command_name" in
     [[ -f "$request_file" && ! -L "$request_file" ]] || fail "request must be a regular non-symlink file"
     [[ "$output_file" = /* ]] || fail "output path must be absolute"
     [[ ! -L "$output_file" ]] || fail "output path must not be a symbolic link"
-    if [[ -e "$output_file" && ! -f "$output_file" ]]; then
-      fail "output path must be a regular file"
+    [[ ! -e "$output_file" ]] || fail "output path already exists; choose a new file"
+    validated_request="${RUNTIME_DIR}/request.json"
+    cp "$request_file" "$validated_request"
+    [[ "$(wc -c <"$validated_request")" -le 65536 ]] || fail "enrollment request is too large"
+    jq -se 'length == 1 and (.[0] |
+      type == "object" and
+      (keys | sort) == ["device_id", "platform", "public_key", "requested_at", "schema_version"] and
+      .schema_version == 1 and
+      (.device_id | type == "string" and test("^[a-z0-9][a-z0-9._-]{1,62}[a-z0-9]$")) and
+      (.platform == "windows" or .platform == "macos") and
+      (.public_key | type == "string" and length <= 512 and test("^ssh-ed25519 [A-Za-z0-9+/]{32,}={0,3}( [A-Za-z0-9][A-Za-z0-9._@+-]{0,127})?$")) and
+      (.requested_at | fromdateiso8601 | type == "number"))
+    ' "$validated_request" >/dev/null || fail "invalid enrollment request"
+    requested_device="$(jq -r '.device_id' "$validated_request")"
+    requested_platform="$(jq -r '.platform' "$validated_request")"
+    jq -r '.public_key' "$validated_request" >"${RUNTIME_DIR}/device.pub"
+    requested_fingerprint="$(ssh-keygen -lf "${RUNTIME_DIR}/device.pub" -E sha256 | awk 'NR == 1 {print $2}')"
+    [[ "$requested_fingerprint" =~ ^SHA256:[A-Za-z0-9+/]{43}$ ]] || fail "invalid device public key"
+
+    # A saved device record recovers approval after a lost response or failed save.
+    devices="$("${SSH_COMMAND[@]}" "$SSH_TARGET" "${DEVICE_COMMAND[@]}" list)" || fail "could not list approved devices"
+    existing="$(printf '%s\n' "$devices" | jq -sce --arg device "$requested_device" \
+      'select(length == 1 and (.[0] | type == "array")) | .[0] | map(select(.device_id == $device))')" || fail "invalid server device list"
+    if [[ "$(printf '%s\n' "$existing" | jq 'length')" == 0 ]]; then
+      approval_response="$("${SSH_COMMAND[@]}" "$SSH_TARGET" "${DEVICE_COMMAND[@]}" approve - <"$validated_request")" \
+        || fail "approval result is unknown; retry with the same request and a new output path"
+      printf '%s\n' "$approval_response" | jq -se \
+        --arg device "$requested_device" --arg platform "$requested_platform" --arg fingerprint "$requested_fingerprint" \
+        'length == 1 and (.[0] | .status == "approved" and .device_id == $device and .platform == $platform and .public_key_fingerprint == $fingerprint)' >/dev/null \
+        || fail "server approval does not match the requested device; no profile was exported"
+    else
+      printf '%s\n' "$existing" | jq -e --arg platform "$requested_platform" --arg fingerprint "$requested_fingerprint" \
+        'length == 1 and (.[0] | .platform == $platform and .public_key_fingerprint == $fingerprint)' >/dev/null \
+        || fail "device id is already assigned to a different identity; no profile was exported"
     fi
 
-    approval_response="$(
-      "${SSH_COMMAND[@]}" "$SSH_TARGET" "$SERVER_DEVICE_TOOL" approve - <"$request_file"
-    )"
-    printf '%s\n' "$approval_response" | jq -e '.status == "approved"' >/dev/null \
-      || fail "server approval failed"
-
-    device_id="$(printf '%s\n' "$approval_response" | jq -r '.device_id')"
-    device_fingerprint="$(printf '%s\n' "$approval_response" | jq -r '.public_key_fingerprint')"
+    device_id="$requested_device"
+    device_fingerprint="$requested_fingerprint"
     issued_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     output_directory="$(dirname "$output_file")"
-    install -d -m 0700 "$output_directory"
+    if [[ ! -d "$output_directory" ]]; then install -d -m 0700 "$output_directory"; fi
     temporary_output="${RUNTIME_DIR}/connection-profile.json"
 
     jq -n \
@@ -190,18 +227,24 @@ case "$command_name" in
         issued_at: $issued_at
       }' >"$temporary_output"
 
-    install -m 0600 "$temporary_output" "$output_file"
+    # Hard-link creation is atomic and refuses an output created during approval.
+    sibling_output="$(mktemp "${output_directory}/.codex-connection.XXXXXX")"
+    if ! install -m 0600 "$temporary_output" "$sibling_output" || ! ln "$sibling_output" "$output_file"; then
+      rm -f -- "$sibling_output"
+      fail "approval may have completed but output could not be saved; preserve the original request"
+    fi
+    rm -f -- "$sibling_output"
     printf 'Approved %s. Connection profile: %s\n' "$device_id" "$output_file"
     ;;
   list)
     [[ $# -eq 1 ]] || fail "list accepts no arguments"
-    "${SSH_COMMAND[@]}" "$SSH_TARGET" "$SERVER_DEVICE_TOOL" list
+    "${SSH_COMMAND[@]}" "$SSH_TARGET" "${DEVICE_COMMAND[@]}" list
     ;;
   revoke)
     [[ $# -eq 2 ]] || fail "revoke requires one device id"
     device_id="$2"
     [[ "$device_id" =~ ^[a-z0-9][a-z0-9._-]{1,62}[a-z0-9]$ ]] || fail "invalid device id"
-    "${SSH_COMMAND[@]}" "$SSH_TARGET" "$SERVER_DEVICE_TOOL" revoke "$device_id"
+    "${SSH_COMMAND[@]}" "$SSH_TARGET" "${DEVICE_COMMAND[@]}" revoke "$device_id"
     ;;
   -h|--help|help)
     usage

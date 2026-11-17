@@ -14,6 +14,7 @@ Describe "Windows doctor and launcher" {
             Mock Test-CvsVersionAtLeast { $true }
             Mock Test-CvsCodexConfiguration { "0.151.0" }
             Mock Get-CvsManagedTunnelProcess { $null }
+            Mock Get-CvsPortListeners { @() }
         }
 
         It "requires explicit live confirmation" {
@@ -48,20 +49,23 @@ Describe "Windows doctor and launcher" {
 
         It "builds a restricted SSH argument list" {
             $arguments = $null
+            $policy = Get-CvsTunnelPolicy
             Mock Get-CvsConnectionProfile { $script:FakeProfile }
-            Mock Test-CvsTailscaleReachability {}
+            Mock Test-CvsTailscaleReachability { throw 'ping_unavailable_while_ssh_works' }
             Mock Test-CvsLocalPortAvailable {}
             Mock Get-CvsVerifiedKnownHosts { "C:\temp\known_hosts" }
             Mock Get-CvsKeyDirectory { $TestDrive }
             Mock Test-Path { $true }
             Mock Get-Item { [pscustomobject]@{LinkType=$null} }
+            Mock Set-CvsPrivateAcl {}
             Mock Get-CvsExecutable { "C:\Windows\System32\OpenSSH\ssh.exe" }
-            Mock Start-Process {
-                $script:arguments = $ArgumentList
-                [pscustomobject]@{HasExited=$false;Id=4321}
+            Mock Start-CvsSshProcess {
+                $script:arguments = $Arguments
+                [pscustomobject]@{Process=[pscustomobject]@{HasExited=$false;Id=4321}}
             }
-            Mock Test-CvsGatewayModels { $true }
-            $tunnel = Start-CvsTunnel
+            Mock Test-CvsGatewayHealth { $true }
+            $tunnel = Start-CvsTunnel -Policy $policy
+            Should -Invoke Test-CvsTailscaleReachability -Times 0
             $joined = $script:arguments -join " "
             $joined | Should -Match '127\.0\.0\.1:18317:127\.0\.0\.1:18319'
             $joined | Should -Match 'BatchMode=yes'
@@ -78,7 +82,7 @@ Describe "Windows doctor and launcher" {
         It "reuses only a verified managed SSH listener" {
             $managed = [pscustomobject]@{HasExited=$false;Id=2468}
             Mock Get-CvsManagedTunnelProcess { $managed }
-            Mock Test-CvsGatewayModels { $true }
+            Mock Test-CvsGatewayHealth { $true }
             Mock Test-CvsTailscaleReachability {}
             $tunnel = Start-CvsTunnel
             $tunnel.Reused | Should -BeTrue
@@ -88,23 +92,21 @@ Describe "Windows doctor and launcher" {
         }
 
         It "accepts DERP Tailscale reachability without waiting for a direct path" {
-            $script:TailscaleArguments = $null
-            function Invoke-FakeTailscale {
-                $script:TailscaleArguments = @($args)
-                $global:LASTEXITCODE = 0
-            }
-            Mock Get-CvsExecutable { "Invoke-FakeTailscale" }
+            Mock Get-CvsExecutable { "C:\Program Files\Tailscale\tailscale.exe" }
+            Mock Invoke-CvsBoundedNative {}
             Test-CvsTailscaleReachability -HostName "100.64.10.20"
-            $script:TailscaleArguments | Should -Be @("ping", "--timeout=5s", "--c=1", "--until-direct=false", "100.64.10.20")
+            Should -Invoke Invoke-CvsBoundedNative -Times 1 -ParameterFilter {
+                $TimeoutSec -eq 10 -and ($Arguments -join ' ') -eq 'ping --timeout=5s --c=1 --until-direct=false 100.64.10.20'
+            }
         }
 
         It "stops the SSH process and removes runtime state" {
-            $runtime = Join-Path $TestDrive "runtime"
+            $runtime = Join-Path ([IO.Path]::GetTempPath()) ('codex-via-server-'+[guid]::NewGuid().ToString('N'))
             New-Item -ItemType Directory -Path $runtime | Out-Null
             $process = [pscustomobject]@{HasExited=$false;Id=4321}
-            Mock Stop-Process {}
-            Stop-CvsTunnel ([pscustomobject]@{Process=$process;RuntimeDirectory=$runtime})
-            Should -Invoke Stop-Process -Times 1 -ParameterFilter {$Id -eq 4321 -and $Force}
+            Mock Stop-CvsManagedProcess { $true }
+            Stop-CvsTunnel ([pscustomobject]@{Process=$process;RuntimeDirectory=$runtime;Profile=$script:FakeProfile})
+            Should -Invoke Stop-CvsManagedProcess -Times 1 -ParameterFilter {$Process.Id -eq 4321}
             Test-Path $runtime | Should -BeFalse
         }
     }

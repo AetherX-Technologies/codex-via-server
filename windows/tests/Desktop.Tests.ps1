@@ -21,7 +21,10 @@ Describe "Windows desktop persistent tunnel" {
             }
             Mock Get-CvsConnectionProfile { $script:DesktopProfile }
             Mock Register-CvsDesktopTask {}
+            Mock Get-ScheduledTask { [pscustomobject]@{State='Ready'} }
             Mock Start-ScheduledTask {}
+            Mock Stop-ScheduledTask {}
+            Mock Wait-CvsLocalPortReleased { $true }
             Mock Wait-CvsDesktopGateway { $true }
             Mock Remove-CvsDesktopTask {}
             Mock Stop-CvsDesktopRuntime { $false }
@@ -77,7 +80,7 @@ base_url = "https://example.invalid/v1"
         }
 
         It "restarts the current-user task and verifies the endpoint" {
-            Mock Get-ScheduledTask { [pscustomobject]@{State="Running"} }
+            Mock Get-ScheduledTask { [pscustomobject]@{State="Ready"} }
             Mock Stop-ScheduledTask {}
             $result = Restart-CvsDesktop
             $result.Status | Should -Be "pass"
@@ -94,8 +97,24 @@ base_url = "https://example.invalid/v1"
             Should -Invoke Wait-CvsDesktopGateway -Times 1
         }
 
+        It 'does not dispatch a second running scheduled task' {
+            Mock Get-ScheduledTask { [pscustomobject]@{State='Running'} }
+            Start-CvsDesktop | Out-Null
+            Start-CvsDesktop | Out-Null
+            Should -Invoke Start-ScheduledTask -Times 0
+            Should -Invoke Wait-CvsDesktopGateway -Times 2
+        }
+
+        It 'keeps repeated manual stops deterministic and leaves a protected stop marker' {
+            Stop-CvsDesktop | Out-Null
+            Stop-CvsDesktop | Out-Null
+            Test-Path (Join-Path (Get-CvsStateDirectory) 'desktop-stopped') | Should -BeTrue
+            Should -Invoke Stop-CvsDesktopRuntime -Times 2
+            Should -Invoke Start-ScheduledTask -Times 0
+        }
+
         It "stops the task and only the managed tunnel runtime" {
-            Mock Get-ScheduledTask { [pscustomobject]@{State="Running"} }
+            Mock Get-ScheduledTask { [pscustomobject]@{State="Ready"} }
             Mock Stop-ScheduledTask {}
             Mock Stop-CvsDesktopRuntime { $true }
             $result = Stop-CvsDesktop
@@ -109,9 +128,10 @@ base_url = "https://example.invalid/v1"
             $persistent = Get-Content -LiteralPath (Join-Path $script:ModuleRoot "persistent-tunnel.ps1") -Raw
             $dispatcher | Should -Match '"desktop-start"'
             $dispatcher | Should -Match '"desktop-stop"'
-            $persistent | Should -Match 'Set-CvsPrivateAcl\s+\$stateDirectory'
-            $persistent | Should -Match 'Set-CvsPrivateAcl\s+\$logPath'
-            $persistent | Should -Match 'Start-Sleep -Seconds 5'
+            $persistent | Should -Match 'Invoke-CvsPersistentTunnel'
+            $module = Get-Content -LiteralPath (Join-Path $script:ModuleRoot 'CodexViaServer.psm1') -Raw
+            $module | Should -Match 'Set-CvsPrivateAcl\s+\$stateDirectory'
+            $module | Should -Match 'Set-CvsPrivateAcl\s+\$logPath'
         }
     }
 }
@@ -148,11 +168,48 @@ Describe "Windows managed SSH process ownership" {
             $process.Id | Should -Be 4321
         }
 
+        It 'compresses forwarding traffic without changing the restricted SSH contract' {
+            $arguments = New-CvsSshArguments -Profile $script:ProcessProfile -Identity 'test-key' -KnownHosts 'test-hosts'
+            @($arguments | Where-Object { $_ -ceq '-C' }).Count | Should -Be 1
+            $arguments | Should -Contain 'StrictHostKeyChecking=yes'
+            $arguments | Should -Contain '127.0.0.1:18317:127.0.0.1:18319'
+        }
+
+        It 'recognizes only the exact previous uncompressed contract during an upgrade' {
+            $legacy = $script:ManagedCommandLine.Replace(' -C ', ' ')
+            Test-CvsManagedSshCommandLine -Profile $script:ProcessProfile -CommandLine $legacy | Should -BeTrue
+            Test-CvsManagedSshCommandLine -Profile $script:ProcessProfile -CommandLine ($legacy.Replace('StrictHostKeyChecking=yes','StrictHostKeyChecking=no')) | Should -BeFalse
+        }
+
+        It 'rejects extra compression flags rather than accepting arbitrary SSH arguments' {
+            $extra = $script:ManagedCommandLine.Replace(' -N -T ', ' -N -T -C ')
+            Test-CvsManagedSshCommandLine -Profile $script:ProcessProfile -CommandLine $extra | Should -BeFalse
+        }
+
+        It 'retains the previous error-only logging contract without relaxing other arguments' {
+            $legacy=$script:ManagedCommandLine.Replace('LogLevel=INFO','LogLevel=ERROR')
+            Test-CvsManagedSshCommandLine -Profile $script:ProcessProfile -CommandLine $legacy | Should -BeTrue
+            Test-CvsManagedSshCommandLine -Profile $script:ProcessProfile -CommandLine ($legacy.Replace('StrictHostKeyChecking=yes','StrictHostKeyChecking=no')) | Should -BeFalse
+            Test-CvsManagedSshCommandLine -Profile $script:ProcessProfile -CommandLine ($legacy.Replace('LogLevel=ERROR','LogLevel=DEBUG')) | Should -BeFalse
+        }
+
         It "returns no process when the approved port has no listener" {
             Mock Get-NetTCPConnection { $null }
             Mock Get-CimInstance {}
             Get-CvsManagedTunnelProcess -Profile $script:ProcessProfile | Should -BeNullOrEmpty
             Should -Invoke Get-CimInstance -Times 0
+        }
+
+        It 'finds an exact SSH still starting only when explicitly requested' {
+            Mock Get-NetTCPConnection { $null }
+            Mock Get-CimInstance { [pscustomobject]@{ProcessId=4321;Name='ssh.exe';ExecutablePath='C:\Windows\System32\OpenSSH\ssh.exe';CommandLine=$script:ManagedCommandLine} }
+            (Get-CvsManagedTunnelProcess -Profile $script:ProcessProfile -IncludeStarting).Id | Should -Be 4321
+        }
+
+        It 'refuses an unrelated starting SSH even without a listener' {
+            Mock Get-NetTCPConnection { $null }
+            Mock Get-CimInstance { [pscustomobject]@{ProcessId=4321;Name='ssh.exe';ExecutablePath='C:\Windows\System32\OpenSSH\ssh.exe';CommandLine='ssh.exe -N example.invalid'} }
+            Get-CvsManagedTunnelProcess -Profile $script:ProcessProfile -IncludeStarting | Should -BeNullOrEmpty
         }
 
         It "rejects an SSH listener with a different forwarding target" {
@@ -172,9 +229,9 @@ Describe "Windows managed SSH process ownership" {
         It "stops an exact matching managed SSH listener" {
             Mock Get-CvsConnectionProfile { $script:ProcessProfile }
             Mock Get-CvsManagedTunnelProcess { [pscustomobject]@{Id=4321;HasExited=$false} }
-            Mock Stop-Process {}
+            Mock Stop-CvsManagedProcess { $true }
             Stop-CvsDesktopRuntime | Should -BeTrue
-            Should -Invoke Stop-Process -Times 1 -ParameterFilter { $Id -eq 4321 -and $Force }
+            Should -Invoke Stop-CvsManagedProcess -Times 1 -ParameterFilter { $Process.Id -eq 4321 }
         }
     }
 }

@@ -42,7 +42,9 @@ jobs:
 
       - name: Run macOS tests
         if: runner.os == 'macOS'
-        run: bash tests/test.sh
+        run: |
+          bash tests/test.sh
+          bash admin/tests/test-admin.sh
 
       - name: Run Windows contract checks
         if: runner.os == 'Windows'
@@ -59,11 +61,11 @@ jobs:
         shell: pwsh
         run: |
           $configuration = New-PesterConfiguration
-          $configuration.Run.Path = @('./windows/tests/Setup.Tests.ps1', './windows/tests/Doctor.Tests.ps1', './windows/tests/Desktop.Tests.ps1', './windows/tests/Update.Tests.ps1')
+          $configuration.Run.Path = @('./windows/tests/Setup.Tests.ps1', './windows/tests/Doctor.Tests.ps1', './windows/tests/Desktop.Tests.ps1', './windows/tests/Recovery.Tests.ps1', './windows/tests/SshDiagnostics.Tests.ps1', './windows/tests/Update.Tests.ps1', './windows/tests/PortableSetup.Tests.ps1', './windows/tests/PortableTask.Tests.ps1', './windows/tests/Admin.Tests.ps1')
           $configuration.Run.PassThru = $true
           $configuration.Output.Verbosity = 'Detailed'
           $result = Invoke-Pester -Configuration $configuration
-          if ($result.FailedCount -gt 0) {
+          if ($result.FailedCount -gt 0 -or $result.FailedContainersCount -gt 0 -or $result.TotalCount -eq 0) {
             foreach ($failed in $result.Failed) {
               $message = ($failed.ErrorRecord | Out-String).Replace("`r", ' ').Replace("`n", ' ')
               Write-Output "::error file=windows/tests/Setup.Tests.ps1,title=$($failed.Name)::$message"

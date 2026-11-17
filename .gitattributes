@@ -1,0 +1,3 @@
+admin/codex-via-server-admin text eol=lf
+admin/*.command text eol=lf
+admin/tests/*.sh text eol=lf

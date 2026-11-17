@@ -21,6 +21,11 @@ switch ($Command) {
     }
     "doctor" {
         $doctorArguments = @($RemainingArguments)
+        if ($doctorArguments -contains '--desktop') {
+            if (@($doctorArguments | Where-Object { $_ -notin @('--desktop','--api') }).Count) { throw 'doctor --desktop accepts only --api' }
+            Get-CvsDesktopStatus -CheckAPI:($doctorArguments -contains '--api')
+            break
+        }
         $live = $doctorArguments -contains "--live"
         $yes = $doctorArguments -contains "--yes"
         $modelIndex = [Array]::IndexOf($doctorArguments, "--model")
@@ -30,6 +35,10 @@ switch ($Command) {
     "desktop-install" {
         if (@($RemainingArguments).Count -ne 0) { throw "desktop-install does not accept arguments" }
         Install-CvsDesktop
+    }
+    'desktop-doctor' {
+        if (@($RemainingArguments | Where-Object { $_ -ne '--api' }).Count) { throw 'desktop-doctor accepts only --api' }
+        Get-CvsDesktopStatus -CheckAPI:($RemainingArguments -contains '--api')
     }
     "desktop-start" {
         if (@($RemainingArguments).Count -ne 0) { throw "desktop-start does not accept arguments" }

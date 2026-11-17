@@ -72,6 +72,11 @@ Windows setup, desktop autostart, recovery, and rollback are documented in
 client uses approved per-device keys and the v0.2 server-side loopback gateway;
 it never stores a real provider API key.
 
+Windows 11 x64 users can use the [single-file setup preview](https://github.com/AetherX-Technologies/codex-via-server/releases/tag/v0.2.0-windows-preview.20261117)
+with bundled PowerShell, Codex CLI and OpenSSH Client. Tailscale and per-device
+administrator approval are still required. See the [setup guide](windows/setup/README.zh-CN.md)
+for installation, upgrades and validation limits.
+
 ## Requirements
 
 ### Mac

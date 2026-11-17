@@ -53,6 +53,10 @@ Windows 的完整安装、设备申请、桌面端开机启动、断线恢复和
 [Windows Codex 桌面端常驻隧道](docs/WINDOWS-DESKTOP.zh-CN.md)。Windows 客户端
 使用管理员批准的每设备独立密钥和 v0.2 服务器回环网关，不在本机保存真实 API Key。
 
+Windows 11 x64 可下载[单文件安装程序预览版](https://github.com/AetherX-Technologies/codex-via-server/releases/tag/v0.2.0-windows-preview.20261117)，
+内置 PowerShell、官方 Codex CLI 和 OpenSSH Client。目标电脑仍需先安装并登录 Tailscale，
+每台设备仍须管理员批准。安装、已有版本迁移与验证边界见[安装程序说明](windows/setup/README.zh-CN.md)。
+
 ## 前提条件
 
 ### 本机
